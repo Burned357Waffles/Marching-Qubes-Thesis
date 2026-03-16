@@ -375,6 +375,9 @@ def test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight):
         # add iso value qubit 
         vc.compose_iso_qubits(weight, verbose)
 
+        if verbose:
+            display_statevector(vc.qc_main)
+
         # Add measurement
         vc.add_meas()
 
