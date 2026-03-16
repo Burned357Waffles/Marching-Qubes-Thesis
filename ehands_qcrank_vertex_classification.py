@@ -121,8 +121,24 @@ class VertexClassifier:
             fig.show()
         
         return qc.compose(qc_add, qubits=[q_a, q_b])
+
+    def ehands_multiplication(self, qc, q_a, q_b, verbose=False):
+        """
+        Output is on q_a
+        """
+        qc_mult = QuantumCircuit(2)
+
+        qc_mult.rz(np.pi/2, 0)
+        qc_mult.cx(1, 0)
+
+        if verbose:
+            print("Multiplication Circuit")
+            fig = qc_mult.draw("mpl")
+            fig.show()
+
+        return qc.compose(qc_mult, qubits=[q_a, q_b])
     
-    def add_iso_qubit_for_ehands(self, qc, data_q, placement_q, weight, negation=True, verbose=False):
+    def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, negation=True, verbose=False):
         qc_iso = QuantumCircuit(1, 1)
         qc_iso.ry(np.arccos(self.isovalue), 0)
 
@@ -133,22 +149,41 @@ class VertexClassifier:
         qc.barrier()
 
         return qc
+
+    def add_k_qubit_for_ehands_mult(self, qc, data_q, placement_q, k, verbose=False):
+        qc_k = QuantumCircuit(1, 1)
+        qc_k.ry(np.arccos(k), 0)
+
+        qc.compose(qc_k, placement_q, inplace=True)
+
+        qc.barrier()
+        qc = self.ehands_multiplication(qc, data_q, placement_q, verbose=False)
+        qc.barrier()
+
+        return qc
     
     def init_data(self, make_iso):
         self.di = DataInfo(self.n_cubes, (-0.99, 0.99), make_iso=make_iso)
 
-    def encode(self, verbose=False):
+    def encode(self, operations, verbose=False):
         # encode sample data into qcrank
         self.eqd = EncodedQData(self.di, measure=False, verbose=verbose)
-
-        self.qc_main = QuantumCircuit(self.di.num_q + self.n_cubes, self.di.num_q + self.n_cubes)
+        total_q = self.di.num_q + operations * self.n_cubes
+        print(f"total q: {total_q}")
+        self.qc_main = QuantumCircuit(total_q, total_q)
         self.qc_main.compose(self.eqd.qcEL[0], list(range(self.di.num_q)), inplace=True)
     
     def compose_iso_qubits(self, weight, verbose=False):
         for i in range(self.n_cubes):
             q_a = self.di.data_qL[i]
             q_b = self.di.num_q + i 
-            self.qc_main = self.add_iso_qubit_for_ehands(self.qc_main, q_a, q_b, self.isovalue, weight, verbose=verbose)
+            self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, self.isovalue, weight, verbose=verbose)
+    
+    def compose_k_qubits(self, k, verbose=False):
+        for i in range(self.n_cubes):
+            q_a = self.di.data_qL[i]
+            q_b = self.di.num_q + self.n_cubes + i
+            self.qc_main = self.add_k_qubit_for_ehands_mult(self.qc_main, q_a, q_b, k, verbose=verbose)
 
     def add_meas(self):
         self.qc_main.barrier()
@@ -370,13 +405,52 @@ def test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight):
         # initialize data and isovalue arrays
         vc = VertexClassifier(n_cubes, isovalue)
         vc.init_data(False)
-        vc.encode(verbose)
+        vc.encode(1, verbose)
 
         # add iso value qubit 
         vc.compose_iso_qubits(weight, verbose)
 
         if verbose:
             display_statevector(vc.qc_main)
+
+        # Add measurement
+        vc.add_meas()
+
+        # Run Simulation
+        n_shots = vc.di.n_data * (2**12)
+        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+        # Recover the data from QC
+        vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+        
+        # verbose for first iteration to draw circuit
+        verbose = False
+        
+    print("Returning data and recovered data lists")
+    return all_rec_list, all_data_list
+
+def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k):
+    print("RUNNING TEST")
+    verbose = True
+
+    all_data_list = [[] for _ in range(n_cubes)]
+    all_rec_list = [[] for _ in range(n_cubes)]
+
+    sim = configure_aer_sim()
+    
+    for _ in range(20):
+        # initialize data and isovalue arrays
+        vc = VertexClassifier(n_cubes, isovalue)
+        vc.init_data(False)
+        vc.encode(2, verbose)
+
+        # add iso value qubits
+        vc.compose_iso_qubits(weight, verbose)
+        # add k qubits
+        vc.compose_k_qubits(k)
+
+        #if verbose:
+            #display_statevector(vc.qc_main)
 
         # Add measurement
         vc.add_meas()
@@ -438,5 +512,7 @@ def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table):
 n_cubes = 3
 isovalue = 0.5
 weight = 0.5
-all_rec_list, all_data_list = test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight)
+k = 0.5
+#all_rec_list, all_data_list = test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight)
+all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k)
 display_residual_analysis(n_cubes, all_data_list, all_rec_list, False)
