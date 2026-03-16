@@ -403,7 +403,7 @@ def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table):
         avg_dif = 0
         for o, r in zip(np.concatenate(all_data_list[i]).flatten(),
                         np.concatenate(all_rec_list[i]).flatten()):
-            dif = o - r
+            dif = r - o
             avg_dif += dif
             if table:
                 print(f"| {o:<14.6f} | {r:<14.6f} | {dif:<14.6f} |")
