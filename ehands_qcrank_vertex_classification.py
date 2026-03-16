@@ -298,7 +298,7 @@ def plot_residuals(actual, theory, title, x_label, y_label, legend):
 
     plt.show()
 
-def plot_residuals_subplots(all_actual, all_theory, labels=None, title_prefix="Residual Comparison", x_label="Original", y_label="Reconstructed"):
+def plot_residuals_subplots(all_actual, all_theory, labels=None, title_prefix="Residual Comparison", x_label="Original", y_label="Reconstructed", filename="residuals.png"):
     """
     Plots residuals for multiple cubes in a single figure with subplots.
 
@@ -346,7 +346,7 @@ def plot_residuals_subplots(all_actual, all_theory, labels=None, title_prefix="R
         ax.grid(True)
         ax.set_aspect('equal', adjustable='box')
     
-    fig.savefig("residuals.png")
+    fig.savefig(filename)
     
     # Hide any unused axes
     for j in range(n_cubes, len(axes)):
@@ -469,7 +469,7 @@ def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k):
     return all_rec_list, all_data_list
     
 
-def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table):
+def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table, filename="residuals.png"):
     for i in range(n_cubes):
         if table:
             print(f"-----------------------------Analysis of Original Cube {i + 1} vs Reconstructed----------------------------------")
@@ -505,7 +505,7 @@ def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table):
     all_theory  = [np.concatenate(all_data_list[i]).flatten() for i in range(n_cubes)]
     labels = [f"Cube {i+1}" for i in range(n_cubes)]
 
-    plot_residuals_subplots(all_actual, all_theory, labels=labels)
+    plot_residuals_subplots(all_actual, all_theory, labels=labels, filename=filename)
         
 
 #---------------------------main---------------------------#
@@ -513,6 +513,13 @@ n_cubes = 3
 isovalue = 0.5
 weight = 0.5
 k = 0.5
-#all_rec_list, all_data_list = test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight)
-all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k)
-display_residual_analysis(n_cubes, all_data_list, all_rec_list, False)
+
+test_num = 1
+
+match test_num:
+    case 1:
+        all_rec_list, all_data_list = test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight)
+        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
+    case 2:
+        all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k)
+        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
