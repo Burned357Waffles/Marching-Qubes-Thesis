@@ -19,6 +19,7 @@ from qiskit.visualization import plot_bloch_multivector, array_to_latex
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
+from qiskit_ibm_runtime.fake_provider import FakeTorino, FakeMarrakesh
 
 print(f"Qiskit version: {qiskit.__version__}")
 
@@ -138,15 +139,18 @@ class VertexClassifier:
 
         return qc.compose(qc_mult, qubits=[q_a, q_b])
     
-    def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, negation=True, verbose=False):
+    def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, negation=True, verbose=False, reset=False):
         qc_iso = QuantumCircuit(1, 1)
         qc_iso.ry(np.arccos(self.isovalue), 0)
 
         qc.compose(qc_iso, placement_q, inplace=True)
 
         qc.barrier()
-        qc = self.ehands_addition(qc, data_q, placement_q, weight=weight, negation=negation, verbose=False)
+        qc = self.ehands_addition(qc, data_q, placement_q, weight=weight, negation=negation, verbose=verbose)
         qc.barrier()
+
+        qc.reset(placement_q)
+        qc_iso.ry(np.arccos(self.isovalue), 0)
 
         return qc
 
@@ -165,19 +169,27 @@ class VertexClassifier:
     def init_data(self, make_iso):
         self.di = DataInfo(self.n_cubes, (-0.99, 0.99), make_iso=make_iso)
 
-    def encode(self, operations, verbose=False):
+    def encode(self, operations, verbose=False, reset=False):
         # encode sample data into qcrank
         self.eqd = EncodedQData(self.di, measure=False, verbose=verbose)
-        total_q = self.di.num_q + operations * self.n_cubes
+        if reset:
+            total_q = self.di.num_q + 1
+        else:    
+            total_q = self.di.num_q + operations * self.n_cubes
         print(f"total q: {total_q}")
         self.qc_main = QuantumCircuit(total_q, total_q)
         self.qc_main.compose(self.eqd.qcEL[0], list(range(self.di.num_q)), inplace=True)
     
-    def compose_iso_qubits(self, weight, verbose=False):
+    def compose_iso_qubits(self, weight, verbose=False, reset=False):
         for i in range(self.n_cubes):
             q_a = self.di.data_qL[i]
-            q_b = self.di.num_q + i 
-            self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, self.isovalue, weight, verbose=verbose)
+            if reset: # if reset, we only use 1 iso qubit and reset it after the addition
+                q_b = self.di.num_q
+            else:
+                q_b = self.di.num_q + i 
+            self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, self.isovalue, weight, verbose=verbose, reset=reset)
+            
+            
     
     def compose_k_qubits(self, k, verbose=False):
         for i in range(self.n_cubes):
@@ -226,8 +238,14 @@ class VertexClassifier:
                     break
 
 
-def configure_aer_sim():
-    sim = AerSimulator()
+def configure_aer_sim(type=None):
+    match type:
+        case "FakeTorino":
+            sim = FakeTorino()
+        case "FakeMarrakesh":
+            sim = FakeMarrakesh()
+        case _:
+            sim = AerSimulator()
 
     print(sim)
     print(f"\nConfiguration: {sim.configuration()}")
@@ -356,10 +374,11 @@ def plot_residuals_subplots(all_actual, all_theory, labels=None, title_prefix="R
     plt.show()
 
 
-def configure_qcrank_options(n_shots):
+def configure_qcrank_sampler(n_shots):
     options = SamplerOptions()
     options.default_shots=n_shots
-    return options
+    sampler = Sampler(mode=sim, options=options)
+    return sampler, options
 
 
 def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
@@ -372,8 +391,7 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
 
     :return: Counts of the measurement outcomes
     """
-    options = configure_qcrank_options(n_shots)
-    sampler = Sampler(mode=sim, options=options)
+    sampler, options = configure_qcrank_sampler(n_shots)
 
     job = sampler.run(tuple(eqd.qcEL))
     jobRes = job.result()
@@ -391,27 +409,25 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
         
     return countsL
 
-
-def test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight):
-    print("RUNNING TEST")
+def test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim):
+    print("RUNNING TEST: ADD WITH RESET ENABLED")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
     verbose = True
-
+    
     all_data_list = [[] for _ in range(n_cubes)]
     all_rec_list = [[] for _ in range(n_cubes)]
-
-    sim = configure_aer_sim()
-    
+  
     for _ in range(20):
         # initialize data and isovalue arrays
         vc = VertexClassifier(n_cubes, isovalue)
         vc.init_data(False)
-        vc.encode(1, verbose)
+        vc.encode(1, verbose, reset)
 
         # add iso value qubit 
-        vc.compose_iso_qubits(weight, verbose)
+        vc.compose_iso_qubits(weight, verbose, reset)
 
-        if verbose:
-            display_statevector(vc.qc_main)
+        #if verbose:
+         #   display_statevector(vc.qc_main)
 
         # Add measurement
         vc.add_meas()
@@ -429,14 +445,13 @@ def test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight):
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
 
-def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k):
-    print("RUNNING TEST")
+def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim):
+    print("RUNNING TEST: MULTIPLY AFTER ADD")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight}), k: {k}")
     verbose = True
 
     all_data_list = [[] for _ in range(n_cubes)]
     all_rec_list = [[] for _ in range(n_cubes)]
-
-    sim = configure_aer_sim()
     
     for _ in range(20):
         # initialize data and isovalue arrays
@@ -514,12 +529,23 @@ isovalue = 0.5
 weight = 0.5
 k = 0.5
 
-test_num = 1
+test_num = 3
+sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
+sim = configure_aer_sim(sims[0])
 
-match test_num:
-    case 1:
-        all_rec_list, all_data_list = test_qcrank_ehands_single_iso_n_data(n_cubes, isovalue, weight)
-        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
-    case 2:
-        all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k)
-        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
+if n_cubes >= 1:
+    match test_num:
+        case 1:
+            reset = False
+            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
+        case 2:
+            reset = True
+            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_reset.png")
+        case 3:
+            all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
+
+else: 
+    print("n_cubes must be 1 or more")
