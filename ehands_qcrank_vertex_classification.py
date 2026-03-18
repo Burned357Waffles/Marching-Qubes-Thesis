@@ -588,12 +588,12 @@ def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table, filen
         
 
 #---------------------------main---------------------------#
-n_cubes = 3
+n_cubes = 1
 isovalue = 0.5
 weight = 0.5
 k = 0.5
 
-test_num = 2
+test_num = 4
 sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
 sim = configure_aer_sim(sims[0])
 
