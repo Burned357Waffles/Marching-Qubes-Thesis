@@ -323,8 +323,8 @@ class VertexClassifier:
         isolevel before classification.
 
         Weighted subtraction rule:
-          effective = weight * value - (1 - weight) * isolevel
-          class = 0 if effective >= 0 else 1
+          subtraction_val = weight * value - (1 - weight) * isolevel
+          class = 0 if subtraction_val >= 0 else 1
 
         :param pred_classes: array-like of shape (n_data,)
         :return: dict with y_true, y_pred, accuracy, confusion_matrix
@@ -334,8 +334,8 @@ class VertexClassifier:
         # For now, compare against the first data channel/cube.
         # self.di.data_inp shape: (n_data, nq_data, 1)
         vals = self.di.data_inp[:, 0, 0]
-        effective_vals = weight * vals - (1.0 - weight) * self.isovalue
-        y_true = np.where(effective_vals >= 0, 0, 1).astype(int)
+        subtraction_vals = weight * vals - (1.0 - weight) * self.isovalue
+        y_true = np.where(subtraction_vals >= 0, 0, 1).astype(int)
 
         if y_pred.shape[0] != y_true.shape[0]:
             raise ValueError(f"pred_classes length {y_pred.shape[0]} != n_data {y_true.shape[0]}")
@@ -539,7 +539,7 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
     all_correct_vals = []
     all_incorrect_vals = []
   
-    for _ in range(20):
+    for _ in range(100):
         # initialize data and isovalue arrays
         vc = VertexClassifier(n_cubes, isovalue)
         #vc.init_data(False, data_range=(-1, 0))
@@ -570,20 +570,26 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
 
         # For every run, print a table of each data point and its classification
         data_vals = vc.di.data_inp[:, 0, 0]
+        # Subtraction value used for the "true" label:
+        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
+        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+
         print("\nPer-data-point classifications")
-        print("+--------+---------------+--------------+----------------+")
-        print("| Index  | Input Value   | True Class   | Pred Class     |")
-        print("+--------+---------------+--------------+----------------+")
-        for idx, (val, y_t, y_p) in enumerate(zip(data_vals, comp["y_true"], comp["y_pred"])):
-            print(f"| {idx:<6d} | {val:<13.6f} | {y_t:<12d} | {y_p:<14d} |")
-        print("+--------+---------------+--------------+----------------+")
+        print("+--------+---------------+------------------+--------------+----------------+")
+        print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
+        print("+--------+---------------+------------------+--------------+----------------+")
+        for idx, (val, sub_val, y_t, y_p) in enumerate(
+            zip(data_vals, subtraction_vals, comp["y_true"], comp["y_pred"])
+        ):
+            print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {y_t:<12d} | {y_p:<14d} |")
+        print("+--------+---------------+------------------+--------------+----------------+")
 
         # Also show value ranges where the classifier is correct vs incorrect
         correct_mask = comp["y_true"] == comp["y_pred"]
         incorrect_mask = ~correct_mask
 
         if np.any(correct_mask):
-            correct_vals = data_vals[correct_mask]
+            correct_vals = subtraction_vals[correct_mask]
             all_correct_vals.append(correct_vals)
             print(f"Correct classifications value range: "
                   f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]")
@@ -591,7 +597,7 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
             print("No correct classifications in this run.")
 
         if np.any(incorrect_mask):
-            incorrect_vals = data_vals[incorrect_mask]
+            incorrect_vals = subtraction_vals[incorrect_mask]
             all_incorrect_vals.append(incorrect_vals)
             print(f"Incorrect classifications value range: "
                   f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]")
@@ -611,6 +617,7 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
 
     # Plot summaries into a single subplots figure, then save as PNG.
     fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}", fontsize=16)
     ax_hist, ax_cm, ax_bar = ax_arr
 
     plot_correct_incorrect_input_histogram(
@@ -670,7 +677,7 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
         concat_incorrect = np.concatenate(all_incorrect_vals)
         ax.hist(concat_incorrect, bins=bins, alpha=0.6, label="Incorrect", color="tab:orange")
 
-    ax.set_xlabel("Input value")
+    ax.set_xlabel("Input value after weighted subtraction")
     ax.set_ylabel("Count over all runs")
     ax.set_title("Input value distribution: correct vs incorrect classifications")
     ax.legend()
