@@ -190,7 +190,11 @@ class VertexClassifier:
         else:    
             total_q = self.di.num_q + operations * self.n_cubes + 1
         #print(f"total q: {total_q}")
-        self.qc_main = QuantumCircuit(total_q, 1)
+        # For classification, we want all address qubits + the classify qubit measured.
+        # Classical bits layout (indices):
+        #   0          : classification bit
+        #   1..nq_addr : address bits
+        self.qc_main = QuantumCircuit(total_q, self.di.nq_addr + 1)
         self.qc_main.compose(self.eqd.qcEL[0], list(range(self.di.num_q)), inplace=True)
     
     def compose_iso_qubits(self, weight, verbose=False, reset=False):
@@ -211,6 +215,15 @@ class VertexClassifier:
     def add_meas(self, classify=False):
         self.qc_main.barrier()
         if classify:
+            # Measure address qubits and classification qubit.
+            # We map classification qubit to classical bit 0, and
+            # address qubits to classical bits 1..nq_addr.
+            # Qiskit bitstrings are ordered as c_{n-1}...c_0, so the
+            # last character (LSB) corresponds to classical bit 0
+            # -> our classification bit. All preceding bits are the
+            # address bits, matching the assumption in `classify`.
+            for i, q in enumerate(self.di.addr_qL):
+                self.qc_main.measure(q, i + 1)
             self.qc_main.measure(self.di.classify_q, 0)
         else:
             self.qc_main.measure(list(range(self.di.num_q)), reversed(list(range(self.di.num_q))))
@@ -250,6 +263,99 @@ class VertexClassifier:
                 print(f'Difference:\n', (data_slice - rec_slice))
                 if i > 2: 
                     break
+    
+
+    def classify(self, countsL):
+        """
+        Classify each data point based on the final bit of the measured
+        bitstrings, using the address bits to map outcomes back to data indices.
+
+        Bitstrings are assumed to come from `nq_addr` address qubits followed by
+        one classification qubit.
+
+        :param countsL: List of count dictionaries as returned by
+                        `run_sim_job_qcrank`. Keys are bitstrings, values are
+                        shot counts.
+        :return: A NumPy array of shape (n_data,) with entries 0 or 1 giving the
+                 classification for each data point.
+        """
+        n_addr = self.di.nq_addr
+        n_data = self.di.n_data
+
+        # Totals per data index for final-bit 0 vs 1
+        zero_totals = np.zeros(n_data, dtype=int)
+        one_totals = np.zeros(n_data, dtype=int)
+
+        for counts in countsL:
+            for bitstring, n_shots in counts.items():
+                if not bitstring:
+                    continue
+
+                # Expect address bits + 1 classify bit; ignore anything else
+                if len(bitstring) < n_addr + 1:
+                    continue
+
+                addr_bits = bitstring[:-1]
+                last_bit = bitstring[-1]
+
+                # Map address bits to data index (0 .. n_data-1)
+                try:
+                    data_idx = int(addr_bits, 2)
+                except ValueError:
+                    continue
+
+                if data_idx < 0 or data_idx >= n_data:
+                    continue
+
+                if last_bit == '0':
+                    zero_totals[data_idx] += n_shots
+                elif last_bit == '1':
+                    one_totals[data_idx] += n_shots
+
+        # For each data point, classify based on which final bit is more frequent
+        classifications = np.where(one_totals > zero_totals, 1, 0)
+        return classifications
+
+    def compare_against_input(self, pred_classes, weight):
+        """
+        Compare predicted classes (per address) against classes derived directly
+        from the input data values, applying a weighted subtraction of the
+        isolevel before classification.
+
+        Weighted subtraction rule:
+          effective = weight * value - (1 - weight) * isolevel
+          class = 0 if effective >= 0 else 1
+
+        :param pred_classes: array-like of shape (n_data,)
+        :return: dict with y_true, y_pred, accuracy, confusion_matrix
+        """
+        y_pred = np.asarray(pred_classes, dtype=int).reshape(-1)
+
+        # For now, compare against the first data channel/cube.
+        # self.di.data_inp shape: (n_data, nq_data, 1)
+        vals = self.di.data_inp[:, 0, 0]
+        effective_vals = weight * vals - (1.0 - weight) * self.isovalue
+        y_true = np.where(effective_vals >= 0, 0, 1).astype(int)
+
+        if y_pred.shape[0] != y_true.shape[0]:
+            raise ValueError(f"pred_classes length {y_pred.shape[0]} != n_data {y_true.shape[0]}")
+
+        accuracy = float(np.mean(y_pred == y_true))
+
+        # confusion matrix in order: [[true0->pred0, true0->pred1],
+        #                             [true1->pred0, true1->pred1]]
+        tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+        fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+        fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+        tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+        cm = np.array([[tn, fp], [fn, tp]], dtype=int)
+
+        return {
+            "y_true": y_true,
+            "y_pred": y_pred,
+            "accuracy": accuracy,
+            "confusion_matrix": cm,
+        }
 
 
 def configure_aer_sim(type=None):
@@ -425,19 +531,23 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
     verbose = True
 
     all_data_list = []
-    counts = {'0': 0, '1': 0}
 
-    fig = None
+    # Accumulate statistics over all iterations
+    agg_counts = {'0': 0, '1': 0}
+    cm_list = []
+    acc_list = []
+    all_correct_vals = []
+    all_incorrect_vals = []
   
     for _ in range(20):
         # initialize data and isovalue arrays
         vc = VertexClassifier(n_cubes, isovalue)
         #vc.init_data(False, data_range=(-1, 0))
-        vc.init_data(False, data_range=(0, 1))
+        vc.init_data(False, data_range=(-1, 1))
         vc.encode_v2(1, verbose, reset)
 
         # add iso value qubit 
-        vc.compose_iso_qubits(weight, verbose, False)
+        vc.compose_iso_qubits(weight, verbose=False, reset=False)
 
         vc.qc_main.cx(vc.di.data_qL[0], vc.di.classify_q)
 
@@ -451,19 +561,144 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
         n_shots = vc.di.n_data * (2**12)
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
-        for k in counts:
-            counts[k] += countsL[0][k]
-        
+        classifications = vc.classify(countsL)
+        comp = vc.compare_against_input(classifications, weight)
+
+        # Store stats
+        cm_list.append(comp["confusion_matrix"])
+        acc_list.append(comp["accuracy"])
+
+        # For every run, print a table of each data point and its classification
+        data_vals = vc.di.data_inp[:, 0, 0]
+        print("\nPer-data-point classifications")
+        print("+--------+---------------+--------------+----------------+")
+        print("| Index  | Input Value   | True Class   | Pred Class     |")
+        print("+--------+---------------+--------------+----------------+")
+        for idx, (val, y_t, y_p) in enumerate(zip(data_vals, comp["y_true"], comp["y_pred"])):
+            print(f"| {idx:<6d} | {val:<13.6f} | {y_t:<12d} | {y_p:<14d} |")
+        print("+--------+---------------+--------------+----------------+")
+
+        # Also show value ranges where the classifier is correct vs incorrect
+        correct_mask = comp["y_true"] == comp["y_pred"]
+        incorrect_mask = ~correct_mask
+
+        if np.any(correct_mask):
+            correct_vals = data_vals[correct_mask]
+            all_correct_vals.append(correct_vals)
+            print(f"Correct classifications value range: "
+                  f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]")
+        else:
+            print("No correct classifications in this run.")
+
+        if np.any(incorrect_mask):
+            incorrect_vals = data_vals[incorrect_mask]
+            all_incorrect_vals.append(incorrect_vals)
+            print(f"Incorrect classifications value range: "
+                  f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]")
+        else:
+            print("No incorrect classifications in this run.")
+
+        # Aggregate class counts over all iterations
+        agg_counts["0"] += int(np.sum(classifications == 0))
+        agg_counts["1"] += int(np.sum(classifications == 1))
+
         # verbose for first iteration only
         verbose = False
     
-    fig = plot_distribution(counts)
+    # After all iterations, summarize and plot using matplotlib
+    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
+    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
+
+    # Plot summaries (show once at the end of this test function)
+    plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20)
+
+    if cm_list:
+        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
+        print("Aggregated confusion matrix over all runs "
+              "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:")
+        print(total_cm)
+        plot_aggregated_confusion_matrix(total_cm)
+
+    plot_aggregated_predicted_class_counts(agg_counts)
+
     plt.show()
+
     print("Returning data and recovered data lists")
-    return counts, all_data_list
+    return agg_counts, all_data_list
     
 
 #---------------------------plots---------------------------#
+
+
+def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20):
+    """
+    Plot a histogram of input values for correct vs incorrect classifications.
+
+    Notes:
+    - This function does not call `plt.show()` so multiple plots can be shown
+      together by the caller.
+    """
+    if not (all_correct_vals or all_incorrect_vals):
+        return
+
+    plt.figure()
+    if all_correct_vals:
+        concat_correct = np.concatenate(all_correct_vals)
+        plt.hist(concat_correct, bins=bins, alpha=0.6, label="Correct", color="tab:blue")
+    if all_incorrect_vals:
+        concat_incorrect = np.concatenate(all_incorrect_vals)
+        plt.hist(concat_incorrect, bins=bins, alpha=0.6, label="Incorrect", color="tab:orange")
+
+    plt.xlabel("Input value")
+    plt.ylabel("Count over all runs")
+    plt.title("Input value distribution: correct vs incorrect classifications")
+    plt.legend()
+    plt.tight_layout()
+
+
+def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix"):
+    """
+    Plot a 2x2 confusion matrix heatmap.
+
+    Notes:
+    - This function does not call `plt.show()` so multiple plots can be shown
+      together by the caller.
+    """
+    plt.figure()
+    plt.imshow(total_cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title(title)
+    plt.colorbar()
+
+    tick_marks = np.arange(2)
+    plt.xticks(tick_marks, ["Pred 0", "Pred 1"])
+    plt.yticks(tick_marks, ["True 0", "True 1"])
+    plt.xlabel("Predicted label")
+    plt.ylabel("True label")
+
+    # Annotate cells with counts
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, int(total_cm[i, j]), ha="center", va="center", color="black")
+
+    plt.tight_layout()
+
+
+def plot_aggregated_predicted_class_counts(agg_counts):
+    """
+    Plot aggregated predicted class counts as a bar chart.
+
+    Notes:
+    - This function does not call `plt.show()` so multiple plots can be shown
+      together by the caller.
+    """
+    plt.figure()
+    labels = ["0", "1"]
+    values = [agg_counts["0"], agg_counts["1"]]
+    plt.bar(labels, values, color=["tab:blue", "tab:orange"])
+    plt.xlabel("Predicted class (final bit)")
+    plt.ylabel("Total count over all runs")
+    plt.title("Aggregated Predicted Class Counts")
+    plt.tight_layout()
 
 
 def plot_residuals(actual, theory, title, x_label, y_label, legend):
@@ -597,21 +832,27 @@ test_num = 4
 sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
 sim = configure_aer_sim(sims[0])
 
-if n_cubes >= 1:
-    match test_num:
-        case 1:
-            reset = False
-            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
-            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
-        case 2:
-            reset = True
-            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
-            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_reset.png")
-        case 3:
-            all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim)
-            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
-        case 4:
-            counts, all_data_list = test_qcrank_ehands_classify(n_cubes, isovalue, weight, True, sim)
-
-else: 
+if n_cubes < 1:
     print("n_cubes must be 1 or more")
+    exit()
+
+match test_num:
+    case 1:
+        reset = False
+        all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
+    case 2:
+        reset = True
+        all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_reset.png")
+    case 3:
+        all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim)
+        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
+    case 4:
+        if n_cubes > 1:
+            print("n_cubes must be 1 for classification") # TODO: update to use multiple cubes
+            exit()
+        counts, all_data_list = test_qcrank_ehands_classify(n_cubes, isovalue, weight, True, sim)
+    case _:
+        print("Invalid test number")
+        exit()
