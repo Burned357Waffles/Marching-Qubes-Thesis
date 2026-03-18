@@ -150,7 +150,7 @@ class VertexClassifier:
         qc = self.ehands_addition(qc, data_q, placement_q, weight=weight, negation=negation, verbose=verbose)
         qc.barrier()
 
-        #qc.reset(placement_q)
+        qc.reset(placement_q)
         qc_iso.ry(np.arccos(self.isovalue), 0)
 
         return qc
