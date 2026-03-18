@@ -609,18 +609,34 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
     print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
 
-    # Plot summaries (show once at the end of this test function)
-    plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20)
+    # Plot summaries into a single subplots figure, then save as PNG.
+    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
+    ax_hist, ax_cm, ax_bar = ax_arr
+
+    plot_correct_incorrect_input_histogram(
+        all_correct_vals,
+        all_incorrect_vals,
+        bins=20,
+        ax=ax_hist
+    )
 
     if cm_list:
         total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
         print("Aggregated confusion matrix over all runs "
               "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:")
         print(total_cm)
-        plot_aggregated_confusion_matrix(total_cm)
+        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
+    else:
+        ax_cm.set_title("Aggregated Confusion Matrix")
+        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
+        ax_cm.axis("off")
 
-    plot_aggregated_predicted_class_counts(agg_counts)
+    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
 
+    fig.tight_layout()
+    out_name = "classification_summary.png"
+    fig.savefig(out_name, dpi=300)
+    print(f"Saved plots to: {out_name}")
     plt.show()
 
     print("Returning data and recovered data lists")
@@ -630,7 +646,7 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
 #---------------------------plots---------------------------#
 
 
-def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20):
+def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
     """
     Plot a histogram of input values for correct vs incorrect classifications.
 
@@ -638,25 +654,29 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
     - This function does not call `plt.show()` so multiple plots can be shown
       together by the caller.
     """
+    if ax is None:
+        ax = plt.gca()
+
     if not (all_correct_vals or all_incorrect_vals):
+        ax.set_title("Input distribution: correct vs incorrect classifications")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
         return
 
-    plt.figure()
     if all_correct_vals:
         concat_correct = np.concatenate(all_correct_vals)
-        plt.hist(concat_correct, bins=bins, alpha=0.6, label="Correct", color="tab:blue")
+        ax.hist(concat_correct, bins=bins, alpha=0.6, label="Correct", color="tab:blue")
     if all_incorrect_vals:
         concat_incorrect = np.concatenate(all_incorrect_vals)
-        plt.hist(concat_incorrect, bins=bins, alpha=0.6, label="Incorrect", color="tab:orange")
+        ax.hist(concat_incorrect, bins=bins, alpha=0.6, label="Incorrect", color="tab:orange")
 
-    plt.xlabel("Input value")
-    plt.ylabel("Count over all runs")
-    plt.title("Input value distribution: correct vs incorrect classifications")
-    plt.legend()
-    plt.tight_layout()
+    ax.set_xlabel("Input value")
+    ax.set_ylabel("Count over all runs")
+    ax.set_title("Input value distribution: correct vs incorrect classifications")
+    ax.legend()
 
 
-def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix"):
+def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
     """
     Plot a 2x2 confusion matrix heatmap.
 
@@ -664,26 +684,29 @@ def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matri
     - This function does not call `plt.show()` so multiple plots can be shown
       together by the caller.
     """
-    plt.figure()
-    plt.imshow(total_cm, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.title(title)
-    plt.colorbar()
+    if ax is None:
+        ax = plt.gca()
+
+    im = ax.imshow(total_cm, interpolation='nearest', cmap=plt.cm.Blues)
+    ax.set_title(title)
+
+    ax.figure.colorbar(im, ax=ax)
 
     tick_marks = np.arange(2)
-    plt.xticks(tick_marks, ["Pred 0", "Pred 1"])
-    plt.yticks(tick_marks, ["True 0", "True 1"])
-    plt.xlabel("Predicted label")
-    plt.ylabel("True label")
+    ax.set_xticks(tick_marks)
+    ax.set_xticklabels(["Pred 0", "Pred 1"])
+    ax.set_yticks(tick_marks)
+    ax.set_yticklabels(["True 0", "True 1"])
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
 
     # Annotate cells with counts
     for i in range(2):
         for j in range(2):
-            plt.text(j, i, int(total_cm[i, j]), ha="center", va="center", color="black")
-
-    plt.tight_layout()
+            ax.text(j, i, int(total_cm[i, j]), ha="center", va="center", color="black")
 
 
-def plot_aggregated_predicted_class_counts(agg_counts):
+def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
     """
     Plot aggregated predicted class counts as a bar chart.
 
@@ -691,14 +714,15 @@ def plot_aggregated_predicted_class_counts(agg_counts):
     - This function does not call `plt.show()` so multiple plots can be shown
       together by the caller.
     """
-    plt.figure()
+    if ax is None:
+        ax = plt.gca()
+
     labels = ["0", "1"]
     values = [agg_counts["0"], agg_counts["1"]]
-    plt.bar(labels, values, color=["tab:blue", "tab:orange"])
-    plt.xlabel("Predicted class (final bit)")
-    plt.ylabel("Total count over all runs")
-    plt.title("Aggregated Predicted Class Counts")
-    plt.tight_layout()
+    ax.bar(labels, values, color=["tab:blue", "tab:orange"])
+    ax.set_xlabel("Predicted class (final bit)")
+    ax.set_ylabel("Total count over all runs")
+    ax.set_title("Aggregated Predicted Class Counts")
 
 
 def plot_residuals(actual, theory, title, x_label, y_label, legend):
