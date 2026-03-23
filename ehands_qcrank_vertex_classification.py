@@ -3,6 +3,7 @@ TODO: Add header comments
 """
 
 
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -237,17 +238,24 @@ class VertexClassifier:
         shpad = n_shots / 2**self.di.nq_addr
         print(f'Shots per address: {shpad:.1f}, relative error ~ {1/np.sqrt(shpad):.3f}')
 
-        self.analyze_all_qcrank_residuals(data_rec, all_data_list, all_rec_list, verbose=verbose)
+        self.construct_data_lists(data_rec, all_data_list, all_rec_list)
 
-    def analyze_all_qcrank_residuals(self, data_rec, all_data_list, all_rec_list, verbose=False):
+        return all_data_list, all_rec_list, data_rec, data_recErr
+    
+    def construct_data_lists(self, data_rec, all_data_list, all_rec_list):
+        for i in range(self.di.nq_data):
+            data_slice = self.di.data_inp[:, i:i+1, :]
+            rec_slice = data_rec[:, i:i+1, :]
+            all_data_list[i].append(data_slice)
+            all_rec_list[i].append(rec_slice)
+        return all_data_list, all_rec_list
+
+    def analyze_all_qcrank_residuals(self, data_rec, verbose=False):
         # Iterate over all input arrays
         for i in range(self.di.nq_data):
             # Save data and recovered to lists
             data_slice = self.di.data_inp[:, i:i+1, :]
             rec_slice = data_rec[:, i:i+1, :]
-
-            all_data_list[i].append(data_slice)
-            all_rec_list[i].append(rec_slice)
 
             # QCrank analysis
             if verbose:
@@ -264,8 +272,16 @@ class VertexClassifier:
                 if i > 2: 
                     break
     
+    def c_classify(self, all_rec_list):
+        # Latest slice per data qubit (each list grows by one append per recover_data call).
+        latest = [subl[-1] for subl in all_rec_list]
+        rec = np.concatenate(latest, axis=1)
+        # Match compare_against_input, which uses the first data channel only.
+        classifications = np.where(rec[:, 0, 0] >= 0, 0, 1)
+        return classifications
 
-    def classify(self, countsL):
+
+    def q_classify(self, countsL):
         """
         Classify each data point based on the final bit of the measured
         bitstrings, using the address bits to map outcomes back to data indices.
@@ -479,7 +495,10 @@ def test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim):
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
         # Recover the data from QC
-        vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        # Analyze the residuals
+        vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
         
         # verbose for first iteration only
         verbose = False
@@ -517,7 +536,10 @@ def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim):
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
         # Recover the data from QC
-        vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        # Analyze the residuals
+        vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
         
         # verbose for first iteration only
         verbose = False
@@ -525,7 +547,7 @@ def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim):
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
 
-def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
+def test_qcrank_ehands_q_classify(n_cubes, isovalue, weight, reset, sim):
     print("RUNNING TEST: CLASSIFY WITH RESET ENABLED")
     print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
     verbose = True
@@ -561,7 +583,7 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
         n_shots = vc.di.n_data * (2**12)
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
-        classifications = vc.classify(countsL)
+        classifications = vc.q_classify(countsL)
         comp = vc.compare_against_input(classifications, weight)
 
         # Store stats
@@ -641,14 +663,140 @@ def test_qcrank_ehands_classify(n_cubes, isovalue, weight, reset, sim):
     plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
 
     fig.tight_layout()
-    out_name = "classification_summary.png"
+    out_name = "q_classification_summary.png"
     fig.savefig(out_name, dpi=300)
     print(f"Saved plots to: {out_name}")
     plt.show()
 
     print("Returning data and recovered data lists")
     return agg_counts, all_data_list
+
+def test_qcrank_ehands_c_classify(n_cubes, isovalue, weight, reset, sim):
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
+    verbose = True
     
+    all_data_list = [[] for _ in range(n_cubes)]
+    all_rec_list = [[] for _ in range(n_cubes)]
+
+    # Accumulate statistics over all iterations
+    agg_counts = {'0': 0, '1': 0}
+    cm_list = []
+    acc_list = []
+    all_correct_vals = []
+    all_incorrect_vals = []
+  
+    for _ in range(100):
+        # initialize data and isovalue arrays
+        vc = VertexClassifier(n_cubes, isovalue)
+        vc.init_data(False)
+        vc.encode(1, verbose, reset)
+
+        # add iso value qubit 
+        vc.compose_iso_qubits(weight, verbose, reset)
+
+        #if verbose:
+         #   display_statevector(vc.qc_main)
+
+        # Add measurement
+        vc.add_meas()
+
+        # Run Simulation
+        n_shots = vc.di.n_data * (2**12)
+        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+        # Recover the data from QC
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        classifications = vc.c_classify(all_rec_list)
+        comp = vc.compare_against_input(classifications, weight)
+
+        cm_list.append(comp["confusion_matrix"])
+        acc_list.append(comp["accuracy"])
+
+        # For every run, print a table of each data point and its classification
+        data_vals = vc.di.data_inp[:, 0, 0]
+        # Subtraction value used for the "true" label:
+        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
+        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+
+        print("\nPer-data-point classifications")
+        print("+--------+---------------+------------------+--------------+----------------+")
+        print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
+        print("+--------+---------------+------------------+--------------+----------------+")
+        for idx, (val, sub_val, y_t, y_p) in enumerate(
+            zip(data_vals, subtraction_vals, comp["y_true"], comp["y_pred"])
+        ):
+            print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {y_t:<12d} | {y_p:<14d} |")
+        print("+--------+---------------+------------------+--------------+----------------+")
+
+        # Also show value ranges where the classifier is correct vs incorrect
+        correct_mask = comp["y_true"] == comp["y_pred"]
+        incorrect_mask = ~correct_mask
+
+        if np.any(correct_mask):
+            correct_vals = subtraction_vals[correct_mask]
+            all_correct_vals.append(correct_vals)
+            print(f"Correct classifications value range: "
+                  f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]")
+        else:
+            print("No correct classifications in this run.")
+
+        if np.any(incorrect_mask):
+            incorrect_vals = subtraction_vals[incorrect_mask]
+            all_incorrect_vals.append(incorrect_vals)
+            print(f"Incorrect classifications value range: "
+                  f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]")
+        else:
+            print("No incorrect classifications in this run.")
+
+        # Aggregate class counts over all iterations
+        agg_counts["0"] += int(np.sum(classifications == 0))
+        agg_counts["1"] += int(np.sum(classifications == 1))
+
+        # Analyze the residuals
+        #vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
+        
+        # verbose for first iteration only
+        verbose = False
+    
+    # After all iterations, summarize and plot using matplotlib
+    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
+    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
+
+    # Plot summaries into a single subplots figure, then save as PNG.
+    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}", fontsize=16)
+    ax_hist, ax_cm, ax_bar = ax_arr
+
+    plot_correct_incorrect_input_histogram(
+        all_correct_vals,
+        all_incorrect_vals,
+        bins=20,
+        ax=ax_hist
+    )
+
+    if cm_list:
+        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
+        print("Aggregated confusion matrix over all runs "
+              "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:")
+        print(total_cm)
+        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
+    else:
+        ax_cm.set_title("Aggregated Confusion Matrix")
+        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
+        ax_cm.axis("off")
+
+    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
+
+    fig.tight_layout()
+    out_name = "c_classification_summary.png"
+    fig.savefig(out_name, dpi=300)
+    print(f"Saved plots to: {out_name}")
+    plt.show()
+    
+    print("Returning data and recovered data lists")
+    return all_rec_list, all_data_list
 
 #---------------------------plots---------------------------#
 
@@ -670,12 +818,21 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
         ax.axis("off")
         return
 
-    if all_correct_vals:
-        concat_correct = np.concatenate(all_correct_vals)
-        ax.hist(concat_correct, bins=bins, alpha=0.6, label="Correct", color="tab:blue")
-    if all_incorrect_vals:
-        concat_incorrect = np.concatenate(all_incorrect_vals)
-        ax.hist(concat_incorrect, bins=bins, alpha=0.6, label="Incorrect", color="tab:orange")
+    concat_correct = (
+        np.concatenate(all_correct_vals) if all_correct_vals else np.array([])
+    )
+    concat_incorrect = (
+        np.concatenate(all_incorrect_vals) if all_incorrect_vals else np.array([])
+    )
+
+    # One shared bin grid so correct vs incorrect use the same bin width and x alignment.
+    parts = [a for a in (concat_correct, concat_incorrect) if a.size]
+    bin_edges = np.histogram_bin_edges(np.concatenate(parts), bins=bins)
+
+    if concat_correct.size:
+        ax.hist(concat_correct, bins=bin_edges, alpha=0.6, label="Correct", color="tab:blue")
+    if concat_incorrect.size:
+        ax.hist(concat_incorrect, bins=bin_edges, alpha=0.6, label="Incorrect", color="tab:orange")
 
     ax.set_xlabel("Input value after weighted subtraction")
     ax.set_ylabel("Count over all runs")
@@ -854,36 +1011,57 @@ def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table, filen
         
 
 #---------------------------main---------------------------#
-n_cubes = 1
-isovalue = 0.5
-weight = 0.5
-k = 0.5
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run QCrank eHANDS vertex reconstruction / classification tests."
+    )
+    parser.add_argument(
+        "test_num",
+        nargs="?",
+        type=int,
+        default=0,
+        choices=(1, 2, 3, 4, 5),
+        metavar="N",
+        help=(
+            "Which test to run: 1=add without reset (+ residual plot), 2=add with reset, "
+            "3=multiply after add, 4=quantum classify, 5=classical classify."
+        ),
+    )
+    args = parser.parse_args()
+    test_num = args.test_num
 
-test_num = 4
-sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
-sim = configure_aer_sim(sims[0])
+    n_cubes = 3
+    isovalue = 0.5
+    weight = 0.5
+    k = 0.5
 
-if n_cubes < 1:
-    print("n_cubes must be 1 or more")
-    exit()
+    sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
+    sim = configure_aer_sim(sims[0])
 
-match test_num:
-    case 1:
-        reset = False
-        all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
-        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
-    case 2:
-        reset = True
-        all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
-        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_reset.png")
-    case 3:
-        all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim)
-        display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
-    case 4:
-        if n_cubes > 1:
-            print("n_cubes must be 1 for classification") # TODO: update to use multiple cubes
-            exit()
-        counts, all_data_list = test_qcrank_ehands_classify(n_cubes, isovalue, weight, True, sim)
-    case _:
-        print("Invalid test number")
-        exit()
+    if n_cubes < 1:
+        print("n_cubes must be 1 or more")
+        sys.exit(1)
+
+    match test_num:
+        case 1:
+            reset = False
+            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub.png")
+        case 2:
+            reset = True
+            all_rec_list, all_data_list = test_qcrank_ehands_add_reset(n_cubes, isovalue, weight, reset, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_reset.png")
+        case 3:
+            all_rec_list, all_data_list = test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim)
+            display_residual_analysis(n_cubes, all_data_list, all_rec_list, False, filename="residuals_sub_mult.png")
+        case 4:
+            if n_cubes > 1:
+                print("n_cubes must be 1 for classification")  # TODO: update to use multiple cubes
+                sys.exit(1)
+            counts, all_data_list = test_qcrank_ehands_q_classify(n_cubes, isovalue, weight, True, sim)
+        case 5:
+            counts, all_data_list = test_qcrank_ehands_c_classify(n_cubes, isovalue, weight, True, sim)
+
+        case _:
+            print("Invalid test number or no test specified")
+            sys.exit(1)
