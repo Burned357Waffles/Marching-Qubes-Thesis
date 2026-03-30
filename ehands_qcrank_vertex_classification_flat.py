@@ -458,7 +458,7 @@ def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
         agg_counts=agg_counts,
         all_correct_vals=all_correct_vals,
         all_incorrect_vals=all_incorrect_vals,
-        out_name="flat_c_classification_summary.png",
+        out_name="flat_c_classification_summary_10x_shots.png",
         bins=20,
     )
     
@@ -583,7 +583,12 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
     ax.legend()
 
 
-def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
+def plot_aggregated_confusion_matrix(
+    total_cm,
+    title="Aggregated Confusion Matrix",
+    ax=None,
+    cmap="Blues",
+):
     """
     Plot a 2x2 confusion matrix heatmap.
 
@@ -594,7 +599,7 @@ def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matri
     if ax is None:
         ax = plt.gca()
 
-    im = ax.imshow(total_cm, interpolation='nearest', cmap=plt.cm.Blues)
+    im = ax.imshow(total_cm, interpolation="nearest", cmap=cmap)
     ax.set_title(title)
 
     ax.figure.colorbar(im, ax=ax)
@@ -607,10 +612,24 @@ def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matri
     ax.set_xlabel("Predicted label")
     ax.set_ylabel("True label")
 
-    # Annotate cells with counts
+    # Annotate cells with counts, using luminance so text stays readable for any colormap.
+    norm = im.norm
+    cm = im.get_cmap()
     for i in range(2):
         for j in range(2):
-            ax.text(j, i, int(total_cm[i, j]), ha="center", va="center", color="black")
+            val = int(total_cm[i, j])
+            rgba = cm(norm(val))  # (r,g,b,a) in 0..1
+            r, g, b = rgba[0], rgba[1], rgba[2]
+            # Relative luminance (sRGB approximation); higher = lighter background.
+            luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            ax.text(
+                j,
+                i,
+                val,
+                ha="center",
+                va="center",
+                color=("black" if luminance > 0.6 else "white"),
+            )
 
 
 def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
