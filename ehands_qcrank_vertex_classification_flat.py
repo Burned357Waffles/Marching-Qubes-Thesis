@@ -6,7 +6,6 @@ TODO: Add header comments
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-import math
 from math import pi
 import sys
 from dotenv import load_dotenv
@@ -15,8 +14,7 @@ from contextlib import redirect_stdout
 
 import qiskit
 from qiskit import QuantumCircuit
-from qiskit.quantum_info import Statevector, Operator
-from qiskit.visualization import plot_histogram, plot_bloch_multivector, plot_distribution, array_to_latex
+from qiskit.visualization import array_to_latex
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
@@ -346,37 +344,7 @@ def configure_aer_sim(type=None):
     
     return sim
 
-def display_statevector(qc):
-    """
-    Display the statevector, unitary matrix, and Bloch sphere representation of a quantum circuit.
-
-    :param qc: QuantumCircuit to analyze
-
-    :return: Statevector of the quantum circuit
-    """
-    # Get Statevector
-    state = Statevector.from_instruction(qc)
-
-    # Display Statevector
-    print("\nStatevector:")
-    print(state.draw("latex"))
-
-    matrix_form = np.array(state).reshape(-1, 1)
-    print("\nStatevector as a matrix:")
-    print(array_to_latex(matrix_form))
-
-    # Display the Unitary Matrix
-    print("Unitary matrix:")
-    print(Operator(qc).draw("latex"))
-
-    # Display Bloch Sphere
-    fig = plot_bloch_multivector(state)
-    plt.show()
-
-    return state
-
-
-def configure_qcrank_sampler(n_shots):
+def configure_qcrank_sampler(sim, n_shots):
     options = SamplerOptions()
     options.default_shots=n_shots
     sampler = Sampler(mode=sim, options=options)
@@ -393,7 +361,7 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
 
     :return: Counts of the measurement outcomes
     """
-    sampler, options = configure_qcrank_sampler(n_shots)
+    sampler, options = configure_qcrank_sampler(sim, n_shots)
 
     job = sampler.run(tuple(eqd.qcEL))
     jobRes = job.result()
@@ -458,41 +426,21 @@ def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
         cm_list.append(comp["confusion_matrix"])
         acc_list.append(comp["accuracy"])
 
-        # For every run, print a table of each data point and its classification
         data_vals = vc.di.data_inp[:, 0, 0]
         # Subtraction value used for the "true" label:
         #   subtraction_val = weight * input_val - (1 - weight) * isolevel
         subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
 
-        print("\nPer-data-point classifications")
-        print("+--------+---------------+------------------+--------------+----------------+")
-        print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
-        print("+--------+---------------+------------------+--------------+----------------+")
-        for idx, (val, sub_val, y_t, y_p) in enumerate(
-            zip(data_vals, subtraction_vals, comp["y_true"], comp["y_pred"])
-        ):
-            print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {y_t:<12d} | {y_p:<14d} |")
-        print("+--------+---------------+------------------+--------------+----------------+")
-
-        # Also show value ranges where the classifier is correct vs incorrect
-        correct_mask = comp["y_true"] == comp["y_pred"]
-        incorrect_mask = ~correct_mask
-
-        if np.any(correct_mask):
-            correct_vals = subtraction_vals[correct_mask]
+        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+            data_vals=data_vals,
+            subtraction_vals=subtraction_vals,
+            y_true=comp["y_true"],
+            y_pred=comp["y_pred"],
+        )
+        if correct_vals is not None:
             all_correct_vals.append(correct_vals)
-            print(f"Correct classifications value range: "
-                  f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]")
-        else:
-            print("No correct classifications in this run.")
-
-        if np.any(incorrect_mask):
-            incorrect_vals = subtraction_vals[incorrect_mask]
+        if incorrect_vals is not None:
             all_incorrect_vals.append(incorrect_vals)
-            print(f"Incorrect classifications value range: "
-                  f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]")
-        else:
-            print("No incorrect classifications in this run.")
 
         # Aggregate class counts over all iterations
         agg_counts["0"] += int(np.sum(classifications == 0))
@@ -504,40 +452,15 @@ def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
         # verbose for first iteration only
         verbose = False
     
-    # After all iterations, summarize and plot using matplotlib
-    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
-    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
-
-    # Plot summaries into a single subplots figure, then save as PNG.
-    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}", fontsize=16)
-    ax_hist, ax_cm, ax_bar = ax_arr
-
-    plot_correct_incorrect_input_histogram(
-        all_correct_vals,
-        all_incorrect_vals,
+    plot_classification_summary_figure(
+        acc_list=acc_list,
+        cm_list=cm_list,
+        agg_counts=agg_counts,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        out_name="flat_c_classification_summary.png",
         bins=20,
-        ax=ax_hist
     )
-
-    if cm_list:
-        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
-        print("Aggregated confusion matrix over all runs "
-              "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:")
-        print(total_cm)
-        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
-    else:
-        ax_cm.set_title("Aggregated Confusion Matrix")
-        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
-        ax_cm.axis("off")
-
-    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
-
-    fig.tight_layout()
-    out_name = "flat_c_classification_summary.png"
-    fig.savefig(out_name, dpi=300)
-    print(f"Saved plots to: {out_name}")
-    plt.show()
     
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
@@ -582,41 +505,21 @@ def test_qcrank_ehands_q_classify_flat(n_cubes, isovalue, weight, sim):
         cm_list.append(comp["confusion_matrix"])
         acc_list.append(comp["accuracy"])
 
-        # For every run, print a table of each data point and its classification
         data_vals = vc.di.data_inp[:, 0, 0]
         # Subtraction value used for the "true" label:
         #   subtraction_val = weight * input_val - (1 - weight) * isolevel
         subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
 
-        print("\nPer-data-point classifications")
-        print("+--------+---------------+------------------+--------------+----------------+")
-        print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
-        print("+--------+---------------+------------------+--------------+----------------+")
-        for idx, (val, sub_val, y_t, y_p) in enumerate(
-            zip(data_vals, subtraction_vals, comp["y_true"], comp["y_pred"])
-        ):
-            print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {y_t:<12d} | {y_p:<14d} |")
-        print("+--------+---------------+------------------+--------------+----------------+")
-
-        # Also show value ranges where the classifier is correct vs incorrect
-        correct_mask = comp["y_true"] == comp["y_pred"]
-        incorrect_mask = ~correct_mask
-
-        if np.any(correct_mask):
-            correct_vals = subtraction_vals[correct_mask]
+        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+            data_vals=data_vals,
+            subtraction_vals=subtraction_vals,
+            y_true=comp["y_true"],
+            y_pred=comp["y_pred"],
+        )
+        if correct_vals is not None:
             all_correct_vals.append(correct_vals)
-            print(f"Correct classifications value range: "
-                  f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]")
-        else:
-            print("No correct classifications in this run.")
-
-        if np.any(incorrect_mask):
-            incorrect_vals = subtraction_vals[incorrect_mask]
+        if incorrect_vals is not None:
             all_incorrect_vals.append(incorrect_vals)
-            print(f"Incorrect classifications value range: "
-                  f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]")
-        else:
-            print("No incorrect classifications in this run.")
 
         # Aggregate class counts over all iterations
         agg_counts["0"] += int(np.sum(classifications == 0))
@@ -625,40 +528,15 @@ def test_qcrank_ehands_q_classify_flat(n_cubes, isovalue, weight, sim):
         # verbose for first iteration only
         verbose = False
     
-    # After all iterations, summarize and plot using matplotlib
-    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
-    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
-
-    # Plot summaries into a single subplots figure, then save as PNG.
-    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}", fontsize=16)
-    ax_hist, ax_cm, ax_bar = ax_arr
-
-    plot_correct_incorrect_input_histogram(
-        all_correct_vals,
-        all_incorrect_vals,
+    plot_classification_summary_figure(
+        acc_list=acc_list,
+        cm_list=cm_list,
+        agg_counts=agg_counts,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        out_name="q_classification_summary.png",
         bins=20,
-        ax=ax_hist
     )
-
-    if cm_list:
-        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
-        print("Aggregated confusion matrix over all runs "
-              "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:")
-        print(total_cm)
-        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
-    else:
-        ax_cm.set_title("Aggregated Confusion Matrix")
-        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
-        ax_cm.axis("off")
-
-    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
-
-    fig.tight_layout()
-    out_name = "q_classification_summary.png"
-    fig.savefig(out_name, dpi=300)
-    print(f"Saved plots to: {out_name}")
-    plt.show()
 
     print("Returning data and recovered data lists")
     return agg_counts, all_data_list
@@ -754,126 +632,103 @@ def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
     ax.set_title("Aggregated Predicted Class Counts")
 
 
-def plot_residuals(actual, theory, title, x_label, y_label, legend):
-    min_val = min(min(actual), min(theory))
-    max_val = max(max(actual), max(theory))
-
-    plt.figure()
-    plt.scatter(theory, actual, label=legend)   
-    # calculate slope of line of best fit
-    coefficients = np.polyfit(theory, actual, 1)
-    print(f"Slope of line of best fit: {coefficients[0]:.4f}")
-    # plot line of best fit
-    plt.plot(theory, np.poly1d(coefficients)(theory), color='red', label='Line of Best Fit')    
-
-    plt.xlabel(x_label)    
-    plt.ylabel(y_label)
-    plt.title(title)
-    plt.legend()
-
-    plt.xlim(min_val, max_val)
-    plt.ylim(min_val, max_val)
-    plt.gca().set_aspect('equal', adjustable='box')
-
-    plt.grid(True)
-
-    plt.show()
-
-def plot_residuals_subplots(all_actual, all_theory, labels=None, title_prefix="Residual Comparison", x_label="Original", y_label="Reconstructed", filename="residuals.png"):
+def print_per_datapoint_classification_table(
+    data_vals,
+    subtraction_vals,
+    y_true,
+    y_pred,
+):
     """
-    Plots residuals for multiple cubes in a single figure with subplots.
-
-    Parameters:
-        all_actual: list of np.arrays, each containing reconstructed data for a cube
-        all_theory: list of np.arrays, each containing original data for a cube
-        labels: list of strings for legend titles per cube (optional)
-        title_prefix: prefix for subplot titles
-        x_label, y_label: axis labels
+    Print a per-data-point table and return (correct_vals, incorrect_vals) where
+    each is a NumPy array of subtraction values (or None if empty).
     """
-    n_cubes = len(all_actual)
-    n_cols = min(3, n_cubes)  # max 3 per row
-    n_rows = math.ceil(n_cubes / n_cols)
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    data_vals = np.asarray(data_vals).reshape(-1)
+    subtraction_vals = np.asarray(subtraction_vals).reshape(-1)
 
-    # Compute global min and max for consistent square axes
-    combined_actual = np.concatenate([a.flatten() for a in all_actual])
-    combined_theory = np.concatenate([t.flatten() for t in all_theory])
-    min_val = min(combined_actual.min(), combined_theory.min())
-    max_val = max(combined_actual.max(), combined_theory.max())
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 5*n_rows))
-    axes = np.array(axes).reshape(-1)  # flatten in case axes is 2D
-    
-    for i in range(n_cubes):
-        ax = axes[i]
-        actual = all_actual[i].flatten()
-        theory = all_theory[i].flatten()
-        lbl = labels[i] if labels else f"Cube {i+1}"
-        
-        ax.scatter(theory, actual, label=lbl)
-        # line of best fit
-        coeffs = np.polyfit(theory, actual, 1)
-        slope = coeffs[0]
-        ax.plot(theory, np.poly1d(coeffs)(theory), linestyle='--', color='red')
+    print("\nPer-data-point classifications")
+    print("+--------+---------------+------------------+--------------+----------------+")
+    print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
+    print("+--------+---------------+------------------+--------------+----------------+")
+    for idx, (val, sub_val, y_t, y_p) in enumerate(
+        zip(data_vals, subtraction_vals, y_true, y_pred)
+    ):
+        print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {int(y_t):<12d} | {int(y_p):<14d} |")
+    print("+--------+---------------+------------------+--------------+----------------+")
 
-        # add slope as text in top-left corner of subplot
-        ax.text(0.05, 0.95, f"Slope = {slope:.3f}", transform=ax.transAxes,
-                fontsize=10, verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.6))
-        
-        ax.set_title(f"{title_prefix} {i+1}")
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(y_label)
-        ax.set_xlim(min_val, max_val)
-        ax.set_ylim(min_val, max_val)
-        ax.grid(True)
-        ax.set_aspect('equal', adjustable='box')
-    
-    fig.savefig(filename)
-    
-    # Hide any unused axes
-    for j in range(n_cubes, len(axes)):
-        axes[j].axis('off')
-    
-    plt.tight_layout()
+    correct_mask = y_true == y_pred
+    incorrect_mask = ~correct_mask
+
+    correct_vals = subtraction_vals[correct_mask] if np.any(correct_mask) else None
+    incorrect_vals = subtraction_vals[incorrect_mask] if np.any(incorrect_mask) else None
+
+    if correct_vals is not None:
+        print(
+            "Correct classifications value range: "
+            f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]"
+        )
+    else:
+        print("No correct classifications in this run.")
+
+    if incorrect_vals is not None:
+        print(
+            "Incorrect classifications value range: "
+            f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]"
+        )
+    else:
+        print("No incorrect classifications in this run.")
+
+    return correct_vals, incorrect_vals
+
+
+def plot_classification_summary_figure(
+    acc_list,
+    cm_list,
+    agg_counts,
+    all_correct_vals,
+    all_incorrect_vals,
+    out_name,
+    bins=20,
+):
+    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
+    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
+
+    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(
+        f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}",
+        fontsize=16,
+    )
+    ax_hist, ax_cm, ax_bar = ax_arr
+
+    plot_correct_incorrect_input_histogram(
+        all_correct_vals,
+        all_incorrect_vals,
+        bins=bins,
+        ax=ax_hist,
+    )
+
+    if cm_list:
+        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
+        print(
+            "Aggregated confusion matrix over all runs "
+            "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:"
+        )
+        print(total_cm)
+        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
+    else:
+        ax_cm.set_title("Aggregated Confusion Matrix")
+        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
+        ax_cm.axis("off")
+
+    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
+
+    fig.tight_layout()
+    fig.savefig(out_name, dpi=300)
+    print(f"Saved plots to: {out_name}")
     plt.show()
+    return mean_acc
 
-def display_residual_analysis(n_cubes, all_data_list, all_rec_list, table, filename="residuals.png"):
-    for i in range(n_cubes):
-        if table:
-            print(f"-----------------------------Analysis of Original Cube {i + 1} vs Reconstructed----------------------------------")
-            print("+----------------+----------------+----------------+")
-            print("| Original Data  | Reconstructed  | Difference     |")
-            print("+----------------+----------------+----------------+")
-            
-        avg_dif = 0
-        for o, r in zip(np.concatenate(all_data_list[i]).flatten(),
-                        np.concatenate(all_rec_list[i]).flatten()):
-            dif = o - r
-            avg_dif += dif
-            if table:
-                print(f"| {o:<14.6f} | {r:<14.6f} | {dif:<14.6f} |")
-        if table:
-            print("+----------------+----------------+----------------+")
-
-        n_points = len(np.concatenate(all_data_list[i]).flatten())
-        avg_dif /= n_points
-
-        print(f"Average Difference: {avg_dif}")
-        """
-        title = f'Original Data Cube {i + 1} vs Reconstructed Data'
-        x_label = 'Original Data'
-        y_label = 'Reconstructed Data'
-        legend = 'Data Points'
-        plot_residuals(np.concatenate(all_rec_list[i]).flatten(),
-                        np.concatenate(all_data_list[i]).flatten(), 
-                        title, x_label, y_label, legend)
-        """
-
-    all_actual = [np.concatenate(all_rec_list[i]).flatten() for i in range(n_cubes)]
-    all_theory  = [np.concatenate(all_data_list[i]).flatten() for i in range(n_cubes)]
-    labels = [f"Cube {i+1}" for i in range(n_cubes)]
-
-    plot_residuals_subplots(all_actual, all_theory, labels=labels, filename=filename)
-        
 
 #---------------------------main---------------------------#
 if __name__ == "__main__":
@@ -897,7 +752,6 @@ if __name__ == "__main__":
     n_cubes = 4
     isovalue = 0.5
     weight = 0.5
-    k = 0.5
 
     sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
     sim = configure_aer_sim(sims[0])
