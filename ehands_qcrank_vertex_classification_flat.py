@@ -48,13 +48,14 @@ print("imports complete")
 
 
 class DataInfo:
-    __slots__ = ('n_data', 'nq_addr', 'nq_data', 'num_q', 'addr_qL', 'data_qL', 'data_inp')
-    def __init__(self, n_cubes, data_range, isovalue=0.5):
+    __slots__ = ('n_data', 'nq_addr', 'nq_data', 'num_q', 'n_circuits', 'addr_qL', 'data_qL', 'data_inp')
+    def __init__(self, n_cubes, data_range, n_circuits=1, isovalue=0.5):
         self.n_data = n_cubes * 8 # data per array
         self.nq_addr = (self.n_data - 1).bit_length()
         self.nq_data = 1
+        self.n_circuits = n_circuits
         # Address space is 2^nq_addr rows; indices [0, n_data) get random data, [n_data, ...) stay 0.
-        self.data_inp = np.zeros((2**self.nq_addr, 1, 1))
+        self.data_inp = np.zeros((2**self.nq_addr, self.nq_data, self.n_circuits))
         self.data_inp[:self.n_data, :, 0] = np.random.uniform(
             data_range[0], data_range[1], size=(self.n_data, 1)
         )
@@ -445,7 +446,7 @@ def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
         vc.add_meas(q_classify=False, c_classify=True)
 
         # Run Simulation
-        n_shots = vc.di.n_data * (2**12)
+        n_shots = 10 * vc.di.n_data * (2**12)
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
         # Recover the data from QC
