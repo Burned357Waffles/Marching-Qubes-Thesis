@@ -121,6 +121,22 @@ class VertexClassifier:
         
         return qc.compose(qc_add, qubits=[q_a, q_b])
 
+    def ehands_multiplication(self, qc, q_a, q_b, verbose=False):
+        """
+        Output is on q_a
+        """
+        qc_mult = QuantumCircuit(2)
+
+        qc_mult.rz(np.pi/2, 0)
+        qc_mult.cx(1, 0)
+
+        if verbose:
+            print("Multiplication Circuit")
+            fig = qc_mult.draw("mpl")
+            fig.show()
+
+        return qc.compose(qc_mult, qubits=[q_a, q_b])
+
     
     def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, negation=True, verbose=False):
         qc_iso = QuantumCircuit(1, 1)
@@ -130,6 +146,31 @@ class VertexClassifier:
 
         qc.barrier()
         qc = self.ehands_addition(qc, data_q, placement_q, weight=weight, negation=negation, verbose=verbose)
+        qc.barrier()
+
+        return qc
+
+    def add_anc_qubit_for_ehands_add(self, qc, data_q, placement_q, negation=True, verbose=False):
+        qc_anc = QuantumCircuit(1, 1)
+        iso_encoded_weight = 1.0 / (1.0 + self.isovalue)
+
+        qc.compose(qc_anc, placement_q, inplace=True)
+
+        qc.barrier()
+        qc = self.ehands_addition(qc, data_q, placement_q, weight=iso_encoded_weight, negation=negation, verbose=verbose)
+        qc.barrier()
+
+        return qc
+    
+    def add_iso_qubit_for_ehands_mult(self, qc, data_q, placement_q, verbose=False):
+        qc_iso = QuantumCircuit(1, 1)
+        k = -self.isovalue/4
+        print(f"k: {k}")
+        qc_iso.ry(np.arccos(k), 0)
+        qc.compose(qc_iso, placement_q, inplace=True)
+
+        qc.barrier()
+        qc = self.ehands_multiplication(qc, data_q, placement_q, verbose=verbose)
         qc.barrier()
 
         return qc
@@ -161,7 +202,17 @@ class VertexClassifier:
     def compose_iso_qubits(self, weight, verbose=False):
         q_a = self.di.data_qL[0]
         q_b = self.di.num_q
-        self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, self.isovalue, weight, verbose=verbose)
+        self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, weight, verbose=verbose)
+
+    def compose_ancilla_qubits_add(self, verbose=False):
+        q_a = self.di.data_qL[0]
+        q_b = self.di.num_q
+        self.qc_main = self.add_anc_qubit_for_ehands_add(self.qc_main, q_a, q_b, verbose=verbose)
+
+    def compose_ancilla_qubits_mult(self, weight, verbose=False):
+        q_a = self.di.data_qL[0]
+        q_b = self.di.num_q
+        self.qc_main = self.add_iso_qubit_for_ehands_mult(self.qc_main, q_a, q_b, verbose=verbose)
             
 
     def add_meas(self, q_classify=False, c_classify=False):
@@ -414,7 +465,7 @@ def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
         vc.add_meas(q_classify=False, c_classify=True)
 
         # Run Simulation
-        n_shots = 10 * vc.di.n_data * (2**12)
+        n_shots = vc.di.n_data * (2**12)
         countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
         # Recover the data from QC
@@ -540,6 +591,168 @@ def test_qcrank_ehands_q_classify_flat(n_cubes, isovalue, weight, sim):
 
     print("Returning data and recovered data lists")
     return agg_counts, all_data_list
+
+def test_qcrank_ehands_c_classify_flat_ancilla(n_cubes, isovalue, weight, sim):
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE AND ANCILLA WEIGHT")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
+    verbose = True
+    
+    # One list per data-qubit channel (matches DataInfo.nq_data and construct_data_lists).
+    nq_data = 1
+    all_data_list = [[] for _ in range(nq_data)]
+    all_rec_list = [[] for _ in range(nq_data)]
+
+    # Accumulate statistics over all iterations
+    agg_counts = {'0': 0, '1': 0}
+    cm_list = []
+    acc_list = []
+    all_correct_vals = []
+    all_incorrect_vals = []
+  
+    for _ in range(100):
+        # initialize data and isovalue arrays
+        vc = VertexClassifier(n_cubes, isovalue)
+        vc.init_data()
+        vc.encode_c_classify(verbose)
+
+        # add iso value qubit 
+        vc.compose_ancilla_qubits_add(verbose=verbose)
+
+        # Add measurement
+        vc.add_meas(q_classify=False, c_classify=True)
+
+        # Run Simulation
+        n_shots = 10 * vc.di.n_data * (2**12)
+        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+        # Recover the data from QC
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        classifications = vc.c_classify(all_rec_list)
+        comp = vc.compare_against_input(classifications, weight)
+
+        cm_list.append(comp["confusion_matrix"])
+        acc_list.append(comp["accuracy"])
+
+        data_vals = vc.di.data_inp[:, 0, 0]
+        # Subtraction value used for the "true" label:
+        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
+        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+
+        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+            data_vals=data_vals,
+            subtraction_vals=subtraction_vals,
+            y_true=comp["y_true"],
+            y_pred=comp["y_pred"],
+        )
+        if correct_vals is not None:
+            all_correct_vals.append(correct_vals)
+        if incorrect_vals is not None:
+            all_incorrect_vals.append(incorrect_vals)
+
+        # Aggregate class counts over all iterations
+        agg_counts["0"] += int(np.sum(classifications == 0))
+        agg_counts["1"] += int(np.sum(classifications == 1))
+
+        # Analyze the residuals
+        #vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
+        
+        # verbose for first iteration only
+        verbose = False
+    
+    plot_classification_summary_figure(
+        acc_list=acc_list,
+        cm_list=cm_list,
+        agg_counts=agg_counts,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        out_name="flat_c_classification_summary_ancilla_weight_10x_shots.png",
+        bins=20,
+    )
+    
+    print("Returning data and recovered data lists")
+    return all_rec_list, all_data_list
+
+def test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim):
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE AND ISO WEIGHT")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
+    verbose = True
+    
+    # One list per data-qubit channel (matches DataInfo.nq_data and construct_data_lists).
+    nq_data = 1
+    all_data_list = [[] for _ in range(nq_data)]
+    all_rec_list = [[] for _ in range(nq_data)]
+
+    # Accumulate statistics over all iterations
+    agg_counts = {'0': 0, '1': 0}
+    cm_list = []
+    acc_list = []
+    all_correct_vals = []
+    all_incorrect_vals = []
+  
+    for _ in range(100):
+        # initialize data and isovalue arrays
+        vc = VertexClassifier(n_cubes, isovalue)
+        vc.init_data()
+        vc.encode_c_classify(verbose)
+
+        # add iso value qubit 
+        vc.compose_ancilla_qubits_mult(weight, verbose)
+
+        # Add measurement
+        vc.add_meas(q_classify=False, c_classify=True)
+
+        # Run Simulation
+        n_shots = vc.di.n_data * (2**12)
+        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+        # Recover the data from QC
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        classifications = vc.c_classify(all_rec_list)
+        comp = vc.compare_against_input(classifications, weight)
+
+        cm_list.append(comp["confusion_matrix"])
+        acc_list.append(comp["accuracy"])
+
+        data_vals = vc.di.data_inp[:, 0, 0]
+        # Subtraction value used for the "true" label:
+        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
+        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+
+        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+            data_vals=data_vals,
+            subtraction_vals=subtraction_vals,
+            y_true=comp["y_true"],
+            y_pred=comp["y_pred"],
+        )
+        if correct_vals is not None:
+            all_correct_vals.append(correct_vals)
+        if incorrect_vals is not None:
+            all_incorrect_vals.append(incorrect_vals)
+
+        # Aggregate class counts over all iterations
+        agg_counts["0"] += int(np.sum(classifications == 0))
+        agg_counts["1"] += int(np.sum(classifications == 1))
+
+        # Analyze the residuals
+        #vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
+        
+        # verbose for first iteration only
+        verbose = False
+    
+    plot_classification_summary_figure(
+        acc_list=acc_list,
+        cm_list=cm_list,
+        agg_counts=agg_counts,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        out_name="flat_mult_c_classification_summary.png",
+        bins=20,
+    )
+    
+    print("Returning data and recovered data lists")
+    return all_rec_list, all_data_list
     
 #---------------------------plots---------------------------#
 
@@ -759,10 +972,10 @@ if __name__ == "__main__":
         nargs="?",
         type=int,
         default=0,
-        choices=(range(1, 3)),
+        choices=(range(1, 4)),
         metavar="N",
         help=(
-            "Which test to run: 1=c_classify_flat"
+            "Which test to run: 1=c_classify_flat, 2=c_classify_flat_iso_weight"
         ),
     )
     args = parser.parse_args()
@@ -782,6 +995,10 @@ if __name__ == "__main__":
     match test_num:
         case 1:
             all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim)
+        case 2:
+            all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim)
+        case 3:
+            all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_ancilla(n_cubes, isovalue, weight, sim)
 
         case _:
             print("Invalid test number or no test specified")

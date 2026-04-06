@@ -521,7 +521,7 @@ def test_qcrank_ehands_add_mult(n_cubes, isovalue, weight, k, sim):
         vc.encode(2, verbose)
 
         # add iso value qubits
-        vc.compose_iso_qubits(weight, verbose)
+        #vc.compose_iso_qubits(weight, verbose)
         # add k qubits
         vc.compose_k_qubits(k)
 
