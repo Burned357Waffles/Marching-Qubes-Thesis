@@ -4,6 +4,7 @@ TODO: Add header comments
 
 
 import argparse
+from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 from math import pi
@@ -48,20 +49,95 @@ print("imports complete")
 #--------------------------------Info Classes--------------------------------#
 class DataInfo:
     __slots__ = ('n_data', 'nq_addr', 'nq_data', 'num_q', 'n_circuits', 'addr_qL', 'data_qL', 'data_inp')
-    def __init__(self, n_cubes, data_range, n_circuits=1, isovalue=0.5):
-        self.n_data = n_cubes * 8 # data per array
+    def __init__(
+        self,
+        n_cubes,
+        data_range,
+        n_circuits=1,
+        isovalue=0.5,
+        use_image=False,
+        image_path=None,
+        image_width=None,
+        image_height=None,
+        image_x_offset=0,
+        image_y_offset=0,
+    ):
+        if use_image:
+            self.n_data = image_width * image_height
+        else:
+            self.n_data = n_cubes * 8 # data per array
+
         self.nq_addr = (self.n_data - 1).bit_length()
         self.nq_data = 1
         self.n_circuits = n_circuits
-        # Address space is 2^nq_addr rows; indices [0, n_data) get random data, [n_data, ...) stay 0.
         self.data_inp = np.zeros((2**self.nq_addr, self.nq_data, self.n_circuits))
-        self.data_inp[:self.n_data, :, 0] = np.random.uniform(
-            data_range[0], data_range[1], size=(self.n_data, 1)
-        )
+        if use_image:
+            self.data_inp = self.image_to_data(
+                image_path,
+                image_width,
+                image_height,
+                image_x_offset,
+                image_y_offset,
+            )
+        else:
+            self.data_inp[:self.n_data, :, 0] = np.random.uniform(
+            data_range[0], data_range[1], size=(self.n_data, 1))
+
         self.data_inp[self.n_data :, :, 0] = 0.0
         self.num_q = self.nq_addr + self.nq_data # Number of qubits in QCrank array
         self.addr_qL = list(range(self.nq_addr))
         self.data_qL = list(range(self.nq_addr, self.nq_addr + self.nq_data))
+    
+    def image_to_data(
+        self,
+        image_path,
+        image_width=None,
+        image_height=None,
+        image_x_offset=0,
+        image_y_offset=0,
+    ):
+        """
+        Convert an image to grayscale data normalized to [-1, 1].
+        """
+        image = Image.open(image_path).convert("L")
+        if image_x_offset < 0 or image_y_offset < 0:
+            raise ValueError("image_x_offset and image_y_offset must be non-negative integers.")
+        if image_x_offset >= image.width or image_y_offset >= image.height:
+            raise ValueError(
+                f"Offset ({image_x_offset}, {image_y_offset}) is outside image bounds "
+                f"({image.width}x{image.height})."
+            )
+
+        crop_width = image_width if image_width is not None else (image.width - image_x_offset)
+        crop_height = image_height if image_height is not None else (image.height - image_y_offset)
+        if crop_width <= 0 or crop_height <= 0:
+            raise ValueError("image_width and image_height must be positive integers.")
+        if image_x_offset + crop_width > image.width or image_y_offset + crop_height > image.height:
+            raise ValueError(
+                f"Requested crop at ({image_x_offset}, {image_y_offset}) with size "
+                f"({crop_width}x{crop_height}) exceeds image size ({image.width}x{image.height})."
+            )
+
+        # PIL uses (0, 0) as top-left origin; crop box is (left, upper, right, lower).
+        image = image.crop(
+            (
+                image_x_offset,
+                image_y_offset,
+                image_x_offset + crop_width,
+                image_y_offset + crop_height,
+            )
+        )
+        data = np.asarray(image, dtype=np.float32)
+        data = (data / 127.5) - 1.0
+
+        flat = data.ravel()
+        n_take = min(self.n_data, flat.shape[0])
+
+        # Match the same shape expected by the rest of the pipeline:
+        # (2**nq_addr, nq_data, n_circuits), with zero-padding already in place.
+        out = np.zeros((2**self.nq_addr, self.nq_data, self.n_circuits), dtype=np.float32)
+        out[:n_take, 0, 0] = flat[:n_take]
+        return out
 
 class EncodedQData:
     __slots__ = ('qc', 'qcEL', 'nq_addr', 'nq_data', 'qcrank_obj')
@@ -177,8 +253,8 @@ class VertexClassifier:
 
         return qc
     
-    def init_data(self, data_range=(-0.99, 0.99)):
-        self.di = DataInfo(self.n_cubes, data_range)
+    def init_data(self, data_range=(-0.99, 0.99), use_image=False, image_path=None, image_width=None, image_height=None, image_x_offset=0, image_y_offset=0):
+        self.di = DataInfo(self.n_cubes, data_range, use_image=use_image, image_path=image_path, image_width=image_width, image_height=image_height, image_x_offset=image_x_offset, image_y_offset=image_y_offset)
 
     def encode_q_classify(self, operations, verbose=False):
         # encode sample data into qcrank
@@ -436,7 +512,6 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
 
 
 #--------------------------------Tests--------------------------------#
-
 def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
     print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE")
     print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
@@ -756,8 +831,126 @@ def test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim):
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
     
+def test_qcrank_ehands_c_classify_flat_image(n_cubes, isovalue, weight, sim, image_path, image_width, image_height):
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE")
+    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
+    verbose = True
+    
+    # One list per data-qubit channel (matches DataInfo.nq_data and construct_data_lists).
+    nq_data = 1
+    all_data_list = [[] for _ in range(nq_data)]
+    all_rec_list = [[] for _ in range(nq_data)]
+
+    # Accumulate statistics over all iterations
+    agg_counts = {'0': 0, '1': 0}
+    cm_list = []
+    acc_list = []
+    all_correct_vals = []
+    all_incorrect_vals = []
+  
+    for _ in range(1):
+        # initialize data and isovalue arrays
+        vc = VertexClassifier(n_cubes, isovalue)
+        vc.init_data(use_image=True, image_path=image_path, image_width=image_width, image_height=image_height, image_x_offset=36, image_y_offset=0)
+        vc.encode_c_classify(verbose)
+
+        # add iso value qubit 
+        vc.compose_iso_qubits(weight, verbose)
+
+        # Add measurement
+        vc.add_meas(q_classify=False, c_classify=True)
+
+        # Run Simulation
+        n_shots = vc.di.n_data * (2**12)
+        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+        # Recover the data from QC
+        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+
+        classifications = vc.c_classify(all_rec_list)
+        comp = vc.compare_against_input(classifications, weight)
+
+        cm_list.append(comp["confusion_matrix"])
+        acc_list.append(comp["accuracy"])
+
+        data_vals = vc.di.data_inp[:, 0, 0]
+        # Subtraction value used for the "true" label:
+        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
+        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+
+        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+            data_vals=data_vals,
+            subtraction_vals=subtraction_vals,
+            y_true=comp["y_true"],
+            y_pred=comp["y_pred"],
+        )
+        if correct_vals is not None:
+            all_correct_vals.append(correct_vals)
+        if incorrect_vals is not None:
+            all_incorrect_vals.append(incorrect_vals)
+
+        # Aggregate class counts over all iterations
+        agg_counts["0"] += int(np.sum(classifications == 0))
+        agg_counts["1"] += int(np.sum(classifications == 1))
+
+        # Analyze the residuals
+        #vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
+        
+        # verbose for first iteration only
+        verbose = False
+    
+    plot_classification_summary_figure(
+        acc_list=acc_list,
+        cm_list=cm_list,
+        agg_counts=agg_counts,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        out_name="flat_c_classification_summary_10x_shots.png",
+        bins=20,
+    )
+    input_tile = vc.di.data_inp[:vc.di.n_data, 0, 0].reshape(image_height, image_width)
+    predicted_tile = np.asarray(comp["y_pred"], dtype=int).reshape(image_height, image_width)
+    plot_input_tile_and_classification(
+        input_tile=input_tile,
+        predicted_tile=predicted_tile,
+        out_name="flat_c_image_tile_vs_classification.png",
+    )
+    
+    print("Returning data and recovered data lists")
+    return all_rec_list, all_data_list
+
 
 #--------------------------------Plots--------------------------------#
+def plot_input_tile_and_classification(input_tile, predicted_tile, out_name):
+    """
+    Plot the processed image tile and predicted classes side-by-side.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+
+    ax_input, ax_pred = axes
+    im0 = ax_input.imshow(input_tile, cmap="gray", vmin=-1.0, vmax=1.0, origin="upper")
+    ax_input.set_title("Input tile (normalized grayscale)")
+    ax_input.set_xlabel("x")
+    ax_input.set_ylabel("y")
+    cbar0 = fig.colorbar(im0, ax=ax_input, ticks=[-1, 0, 1], fraction=0.046, pad=0.04)
+    cbar0.set_ticklabels(["-1", "0", "1"])
+    ax_input.set_xticks(np.arange(input_tile.shape[1]))
+    ax_input.set_yticks(np.arange(input_tile.shape[0]))
+
+    im1 = ax_pred.imshow(predicted_tile, cmap="viridis", vmin=0, vmax=1, origin="upper")
+    ax_pred.set_title("Predicted classification")
+    ax_pred.set_xlabel("x")
+    ax_pred.set_ylabel("y")
+    cbar = fig.colorbar(im1, ax=ax_pred, ticks=[0, 1], fraction=0.046, pad=0.04)
+    cbar.set_ticklabels(["0", "1"])
+    ax_pred.set_xticks(np.arange(predicted_tile.shape[1]))
+    ax_pred.set_yticks(np.arange(predicted_tile.shape[0]))
+
+    fig.tight_layout()
+    fig.savefig(out_name, bbox_inches="tight", dpi=150)
+    print(f"Saved image tile comparison plot to: {out_name}")
+
+
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
     """
     Plot a histogram of input values for correct vs incorrect classifications.
@@ -955,17 +1148,17 @@ if __name__ == "__main__":
         nargs="?",
         type=int,
         default=0,
-        choices=(range(1, 4)),
+        choices=(range(1, 5)),
         metavar="N",
         help=(
-            "Which test to run: 1=c_classify_flat, 2=c_classify_flat_iso_weight"
+            "Which test to run: 1=c_classify_flat, 2=c_classify_flat_mult, 3=c_classify_flat_ancilla, 4=c_classify_flat_image"
         ),
     )
     args = parser.parse_args()
     test_num = args.test_num
 
     n_cubes = 4
-    isovalue = 0.5
+    isovalue = -0.5
     weight = 0.5
 
     sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
@@ -982,7 +1175,8 @@ if __name__ == "__main__":
             all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim)
         case 3:
             all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_ancilla(n_cubes, isovalue, weight, sim)
-
+        case 4:
+            all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_image(n_cubes, isovalue, weight, sim, image_path="test_images/Plant_tissue_sections_-_39815344093.jpg", image_width=4, image_height=4)
         case _:
             print("Invalid test number or no test specified")
             sys.exit(1)
