@@ -45,6 +45,7 @@ from datacircuits.ParametricQCrankV2 import ParametricQCrankV2 as QCrankV2, anal
 print("imports complete")
 
 
+#--------------------------------Info Classes--------------------------------#
 class DataInfo:
     __slots__ = ('n_data', 'nq_addr', 'nq_data', 'num_q', 'n_circuits', 'addr_qL', 'data_qL', 'data_inp')
     def __init__(self, n_cubes, data_range, n_circuits=1, isovalue=0.5):
@@ -80,6 +81,7 @@ class EncodedQData:
             print(f"Created {len(self.qcEL)} circuits")
 
 
+#--------------------------------VertexClassifier Class--------------------------------#
 class VertexClassifier:
     def __init__(self, n_cubes, isovalue):
         self.n_cubes = n_cubes
@@ -214,7 +216,6 @@ class VertexClassifier:
         q_b = self.di.num_q
         self.qc_main = self.add_iso_qubit_for_ehands_mult(self.qc_main, q_a, q_b, verbose=verbose)
             
-
     def add_meas(self, q_classify=False, c_classify=False):
         self.qc_main.barrier()
         if c_classify:
@@ -371,6 +372,7 @@ class VertexClassifier:
         }
 
 
+#--------------------------------Simulation Utility Functions--------------------------------#
 def configure_aer_sim(type=None):
     match type:
         case "FakeTorino":
@@ -433,7 +435,7 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
     return countsL
 
 
-#---------------------------tests---------------------------#
+#--------------------------------Tests--------------------------------#
 
 def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
     print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE")
@@ -754,9 +756,8 @@ def test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim):
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
     
-#---------------------------plots---------------------------#
 
-
+#--------------------------------Plots--------------------------------#
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
     """
     Plot a histogram of input values for correct vs incorrect classifications.
@@ -796,12 +797,7 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
     ax.legend()
 
 
-def plot_aggregated_confusion_matrix(
-    total_cm,
-    title="Aggregated Confusion Matrix",
-    ax=None,
-    cmap="Blues",
-):
+def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None, cmap="Blues"):
     """
     Plot a 2x2 confusion matrix heatmap.
 
@@ -864,12 +860,7 @@ def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
     ax.set_title("Aggregated Predicted Class Counts")
 
 
-def print_per_datapoint_classification_table(
-    data_vals,
-    subtraction_vals,
-    y_true,
-    y_pred,
-):
+def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
     """
     Print a per-data-point table and return (correct_vals, incorrect_vals) where
     each is a NumPy array of subtraction values (or None if empty).
@@ -914,15 +905,7 @@ def print_per_datapoint_classification_table(
     return correct_vals, incorrect_vals
 
 
-def plot_classification_summary_figure(
-    acc_list,
-    cm_list,
-    agg_counts,
-    all_correct_vals,
-    all_incorrect_vals,
-    out_name,
-    bins=20,
-):
+def plot_classification_summary_figure(acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, out_name, bins=20):
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
     print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
 
@@ -962,7 +945,7 @@ def plot_classification_summary_figure(
     return mean_acc
 
 
-#---------------------------main---------------------------#
+#--------------------------------Main--------------------------------#
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Run QCrank eHANDS vertex reconstruction / classification tests."
