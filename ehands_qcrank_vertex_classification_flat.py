@@ -7,6 +7,7 @@ import argparse
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 from math import pi
 import sys
 from dotenv import load_dotenv
@@ -941,10 +942,17 @@ def plot_input_tile_and_classification(input_tile, predicted_tile, out_name):
     ax_pred.set_title("Predicted classification")
     ax_pred.set_xlabel("x")
     ax_pred.set_ylabel("y")
-    cbar = fig.colorbar(im1, ax=ax_pred, ticks=[0, 1], fraction=0.046, pad=0.04)
-    cbar.set_ticklabels(["0", "1"])
     ax_pred.set_xticks(np.arange(predicted_tile.shape[1]))
     ax_pred.set_yticks(np.arange(predicted_tile.shape[0]))
+    cmap = plt.get_cmap("viridis")
+    ax_pred.legend(
+        handles=[
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="0 = inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="1 = outside"),
+        ],
+        loc="upper right",
+        framealpha=0.95,
+    )
 
     fig.tight_layout()
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
