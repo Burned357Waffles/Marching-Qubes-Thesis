@@ -1112,13 +1112,13 @@ def test_qcrank_ehands_c_classify_flat_image(
         agg_counts=agg_counts,
         all_correct_vals=all_correct_vals,
         all_incorrect_vals=all_incorrect_vals,
-        out_name=f"classification_summaries/flat_c_classification_summary_full_image_tiles_{rw}x{rh}.png",
+        out_name=f"classification_summaries/flat_c_classification_summary_full_image_tiles_circles_{rw}x{rh}.png",
         bins=20,
     )
     plot_full_image_vs_classification(
         padded_canvas_gray,
         padded_canvas_pred,
-        out_name=f"side-by-sides/flat_c_full_image_vs_classification_{rw}x{rh}.png",
+        out_name=f"side-by-sides/flat_c_full_image_vs_classification_circles_{rw}x{rh}.png",
         region_size_hw=(rh, rw),
         tile_size_hw=(tile_height, tile_width),
         isovalue=image_isovalue,
