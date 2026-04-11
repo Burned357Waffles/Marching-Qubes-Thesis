@@ -1144,13 +1144,13 @@ def plot_input_tile_and_classification(input_tile, predicted_tile, out_name):
     ax_input.set_xticks(np.arange(input_tile.shape[1]))
     ax_input.set_yticks(np.arange(input_tile.shape[0]))
 
-    im1 = ax_pred.imshow(predicted_tile, cmap="viridis", vmin=0, vmax=1, origin="upper")
+    im1 = ax_pred.imshow(predicted_tile, cmap="viridis_r", vmin=0, vmax=1, origin="upper")
     ax_pred.set_title("Predicted classification")
     ax_pred.set_xlabel("x")
     ax_pred.set_ylabel("y")
     ax_pred.set_xticks(np.arange(predicted_tile.shape[1]))
     ax_pred.set_yticks(np.arange(predicted_tile.shape[0]))
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap("viridis_r")
     ax_pred.legend(
         handles=[
             Patch(facecolor=cmap(0.0), edgecolor="black", label="0 = inside"),
@@ -1217,7 +1217,7 @@ def plot_full_image_vs_classification(
     cbar0.set_ticklabels(["-1", "0", "1"])
 
     im1 = ax_pred.imshow(
-        predicted_image, cmap="viridis", vmin=0, vmax=1, origin="upper", zorder=1
+        predicted_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
     )
     if region_size_hw is not None:
         if n_pad > 0:
@@ -1230,7 +1230,7 @@ def plot_full_image_vs_classification(
         ax_pred.set_title("Predicted classification (stitched tiles)")
     ax_pred.set_xlabel("x (column)")
     ax_pred.set_ylabel("y (row)")
-    cmap = plt.get_cmap("viridis")
+    cmap = plt.get_cmap("viridis_r")
     ax_pred.legend(
         handles=[
             Patch(facecolor=cmap(0.0), edgecolor="black", label="0 = inside"),
