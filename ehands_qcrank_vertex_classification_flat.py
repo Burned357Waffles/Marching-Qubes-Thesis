@@ -62,6 +62,7 @@ class DataInfo:
         image_height=None,
         image_x_offset=0,
         image_y_offset=0,
+        image_array=None,
     ):
         if use_image:
             self.n_data = image_width * image_height
@@ -71,24 +72,48 @@ class DataInfo:
         self.nq_addr = (self.n_data - 1).bit_length()
         self.nq_data = 1
         self.n_circuits = n_circuits
-        self.data_inp = np.zeros((2**self.nq_addr, self.nq_data, self.n_circuits))
+        # Unused address slots (2**nq_addr > n_data) hold -1 ("outside"), not mid-gray 0.
+        self.data_inp = np.full(
+            (2**self.nq_addr, self.nq_data, self.n_circuits), -1.0, dtype=np.float32
+        )
         if use_image:
-            self.data_inp = self.image_to_data(
-                image_path,
-                image_width,
-                image_height,
-                image_x_offset,
-                image_y_offset,
-            )
+            if image_array is not None:
+                self.data_inp = self.normalized_array_to_data(
+                    image_array, image_width, image_height
+                )
+            else:
+                self.data_inp = self.image_to_data(
+                    image_path,
+                    image_width,
+                    image_height,
+                    image_x_offset,
+                    image_y_offset,
+                )
         else:
             self.data_inp[:self.n_data, :, 0] = np.random.uniform(
             data_range[0], data_range[1], size=(self.n_data, 1))
 
-        self.data_inp[self.n_data :, :, 0] = 0.0
+        self.data_inp[self.n_data :, :, 0] = -1.0
         self.num_q = self.nq_addr + self.nq_data # Number of qubits in QCrank array
         self.addr_qL = list(range(self.nq_addr))
         self.data_qL = list(range(self.nq_addr, self.nq_addr + self.nq_data))
-    
+
+    def normalized_array_to_data(self, arr, image_width, image_height):
+        """
+        Flatten a pre-normalized (image_height, image_width) tile in [-1, 1] into
+        the QCrank buffer (same layout as image_to_data).
+        """
+        a = np.asarray(arr, dtype=np.float32)
+        if a.shape != (image_height, image_width):
+            raise ValueError(
+                f"image_array shape {a.shape} != ({image_height}, {image_width})"
+            )
+        flat = a.ravel()
+        n_take = min(self.n_data, flat.shape[0])
+        out = np.full((2**self.nq_addr, self.nq_data, self.n_circuits), -1.0, dtype=np.float32)
+        out[:n_take, 0, 0] = flat[:n_take]
+        return out
+
     def image_to_data(
         self,
         image_path,
@@ -134,9 +159,8 @@ class DataInfo:
         flat = data.ravel()
         n_take = min(self.n_data, flat.shape[0])
 
-        # Match the same shape expected by the rest of the pipeline:
-        # (2**nq_addr, nq_data, n_circuits), with zero-padding already in place.
-        out = np.zeros((2**self.nq_addr, self.nq_data, self.n_circuits), dtype=np.float32)
+        # (2**nq_addr, nq_data, n_circuits); tail addresses use -1 ("outside").
+        out = np.full((2**self.nq_addr, self.nq_data, self.n_circuits), -1.0, dtype=np.float32)
         out[:n_take, 0, 0] = flat[:n_take]
         return out
 
@@ -254,8 +278,18 @@ class VertexClassifier:
 
         return qc
     
-    def init_data(self, data_range=(-0.99, 0.99), use_image=False, image_path=None, image_width=None, image_height=None, image_x_offset=0, image_y_offset=0):
-        self.di = DataInfo(self.n_cubes, data_range, use_image=use_image, image_path=image_path, image_width=image_width, image_height=image_height, image_x_offset=image_x_offset, image_y_offset=image_y_offset)
+    def init_data(self, data_range=(-0.99, 0.99), use_image=False, image_path=None, image_width=None, image_height=None, image_x_offset=0, image_y_offset=0, image_array=None):
+        self.di = DataInfo(
+            self.n_cubes,
+            data_range,
+            use_image=use_image,
+            image_path=image_path,
+            image_width=image_width,
+            image_height=image_height,
+            image_x_offset=image_x_offset,
+            image_y_offset=image_y_offset,
+            image_array=image_array,
+        )
 
     def encode_q_classify(self, operations, verbose=False):
         # encode sample data into qcrank
@@ -911,7 +945,7 @@ def test_qcrank_ehands_c_classify_flat_image(
 
     isovalue_mode:
       - 'auto_median' (or legacy 'auto_median_tile'): one isovalue for the whole image,
-        the median of all normalized pixels in the trimmed region (constant per tile).
+        the median of all normalized pixels in the region (constant per tile).
       - 'fixed': use the provided `isovalue` for every tile.
 
     inside_bias: subtracted from that isovalue (clipped to [-1, 1]). With weight 0.5,
@@ -920,7 +954,9 @@ def test_qcrank_ehands_c_classify_flat_image(
 
     The region processed starts at (image_x_offset, image_y_offset); its size is
     region_width x region_height if given, otherwise the remaining image extent.
-    The region is trimmed to a multiple of the tile size so all tiles are full.
+    Edge tiles are padded to tile_width x tile_height with normalized black (-1.0) so
+    padded pixels bias toward "outside" under the weighted isovalue rule; the full
+    region is covered without cropping.
     """
     if isovalue_mode == "auto_median_tile":
         isovalue_mode = "auto_median"
@@ -936,25 +972,19 @@ def test_qcrank_ehands_c_classify_flat_image(
     rw, rh = _image_region_dimensions(
         image_path, image_x_offset, image_y_offset, region_width, region_height
     )
-    n_tx = rw // tile_width
-    n_ty = rh // tile_height
-    if n_tx < 1 or n_ty < 1:
-        raise ValueError(
-            f"Tile {tile_width}x{tile_height} does not fit in region {rw}x{rh}."
-        )
-    trim_w = n_tx * tile_width
-    trim_h = n_ty * tile_height
-    if trim_w != rw or trim_h != rh:
-        print(
-            f"Note: trimming region from {rw}x{rh} to {trim_w}x{trim_h} "
-            f"({n_tx}x{n_ty} full tiles)."
-        )
+    if rw < 1 or rh < 1:
+        raise ValueError(f"Region size must be positive; got {rw}x{rh}.")
+    n_tx = (rw + tile_width - 1) // tile_width
+    n_ty = (rh + tile_height - 1) // tile_height
 
     n_tiles = n_tx * n_ty
-    print(f"Processing {n_tiles} tiles ({n_tx}x{n_ty}) over image region {trim_w}x{trim_h}.")
+    print(
+        f"Processing {n_tiles} tiles ({n_tx}x{n_ty}) over full region {rw}x{rh} "
+        f"(edge tiles padded with -1.0 to {tile_width}x{tile_height} where needed)."
+    )
 
     region_gray = load_normalized_grayscale_region(
-        image_path, image_x_offset, image_y_offset, trim_w, trim_h
+        image_path, image_x_offset, image_y_offset, rw, rh
     )
     if isovalue_mode == "auto_median":
         iso_before_bias = auto_isovalue_median(region_gray.ravel())
@@ -973,8 +1003,10 @@ def test_qcrank_ehands_c_classify_flat_image(
             f"- inside_bias ({inside_bias:.4f}) = {image_isovalue:.4f} (more 'inside' / class 0)"
         )
 
-    full_gray = region_gray.astype(np.float32, copy=True)
-    full_pred = np.zeros((trim_h, trim_w), dtype=np.int32)
+    canvas_h = n_ty * tile_height
+    canvas_w = n_tx * tile_width
+    padded_canvas_gray = np.full((canvas_h, canvas_w), -1.0, dtype=np.float32)
+    padded_canvas_pred = np.zeros((canvas_h, canvas_w), dtype=np.int32)
 
     nq_data = 1
     all_data_list = [[] for _ in range(nq_data)]
@@ -989,18 +1021,26 @@ def test_qcrank_ehands_c_classify_flat_image(
     tile_index = 0
     for ty in range(n_ty):
         for tx in range(n_tx):
-            x_off = image_x_offset + tx * tile_width
-            y_off = image_y_offset + ty * tile_height
             verbose = tile_index == 0
+
+            x0 = tx * tile_width
+            y0 = ty * tile_height
+            x1 = min(x0 + tile_width, rw)
+            y1 = min(y0 + tile_height, rh)
+            w_sub = x1 - x0
+            h_sub = y1 - y0
+            padded_tile = np.full((tile_height, tile_width), -1.0, dtype=np.float32)
+            padded_tile[:h_sub, :w_sub] = region_gray[y0:y1, x0:x1]
 
             vc = VertexClassifier(n_cubes, 0.0)
             vc.init_data(
                 use_image=True,
-                image_path=image_path,
+                image_path=None,
+                image_array=padded_tile,
                 image_width=tile_width,
                 image_height=tile_height,
-                image_x_offset=x_off,
-                image_y_offset=y_off,
+                image_x_offset=0,
+                image_y_offset=0,
             )
 
             vc.isovalue = image_isovalue
@@ -1051,12 +1091,18 @@ def test_qcrank_ehands_c_classify_flat_image(
             agg_counts["0"] += int(np.sum(classifications == 0))
             agg_counts["1"] += int(np.sum(classifications == 1))
 
-            pred_tile = np.asarray(comp["y_pred"], dtype=int).reshape(
-                tile_height, tile_width
+            n_pix = tile_width * tile_height
+            pred_tile = (
+                np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(
+                    tile_height, tile_width
+                )
             )
-            y0, y1 = ty * tile_height, (ty + 1) * tile_height
-            x0, x1 = tx * tile_width, (tx + 1) * tile_width
-            full_pred[y0:y1, x0:x1] = pred_tile
+            ty0 = ty * tile_height
+            tx0 = tx * tile_width
+            ty1 = ty0 + tile_height
+            tx1 = tx0 + tile_width
+            padded_canvas_gray[ty0:ty1, tx0:tx1] = padded_tile
+            padded_canvas_pred[ty0:ty1, tx0:tx1] = pred_tile
 
             tile_index += 1
 
@@ -1070,9 +1116,11 @@ def test_qcrank_ehands_c_classify_flat_image(
         bins=20,
     )
     plot_full_image_vs_classification(
-        full_gray,
-        full_pred,
+        padded_canvas_gray,
+        padded_canvas_pred,
         out_name="flat_c_full_image_vs_classification.png",
+        region_size_hw=(rh, rw),
+        tile_size_hw=(tile_height, tile_width),
     )
 
     print("Returning data and recovered data lists (last tile only)")
@@ -1117,9 +1165,22 @@ def plot_input_tile_and_classification(input_tile, predicted_tile, out_name):
     print(f"Saved image tile comparison plot to: {out_name}")
 
 
-def plot_full_image_vs_classification(input_image, predicted_image, out_name):
+def plot_full_image_vs_classification(
+    input_image,
+    predicted_image,
+    out_name,
+    *,
+    region_size_hw=None,
+    tile_size_hw=None,
+):
     """
-    Side-by-side full region: normalized grayscale input and stitched per-tile predictions.
+    Side-by-side: normalized grayscale input and per-tile predictions.
+
+    When ``region_size_hw`` and ``tile_size_hw`` are set (tiled image path), the
+    arrays are full tile canvases. Pixels with column >= rw or row >= rh
+    are padded (-1 in the input); they are highlighted in magenta when present.
+    If the region is an exact multiple of the tile size, canvas equals image and
+    there is no spatial padding to show.
     """
     input_image = np.asarray(input_image, dtype=np.float32)
     predicted_image = np.asarray(predicted_image, dtype=np.int32)
@@ -1129,17 +1190,46 @@ def plot_full_image_vs_classification(input_image, predicted_image, out_name):
     fig, axes = plt.subplots(1, 2, figsize=(2.0 * fig_w, fig_h))
 
     ax_input, ax_pred = axes
-    im0 = ax_input.imshow(input_image, cmap="gray", vmin=-1.0, vmax=1.0, origin="upper")
-    ax_input.set_title("Input (full region, normalized grayscale)")
-    ax_input.set_xlabel("x")
-    ax_input.set_ylabel("y")
+    im0 = ax_input.imshow(input_image, cmap="gray", vmin=-1.0, vmax=1.0, origin="upper", zorder=1)
+
+    n_pad = 0
+    if region_size_hw is not None:
+        rh_i, rw_i = int(region_size_hw[0]), int(region_size_hw[1])
+        cy = np.arange(h)[:, np.newaxis]
+        cx = np.arange(w)[np.newaxis, :]
+        pad_mask = (cy >= rh_i) | (cx >= rw_i)
+        n_pad = int(np.sum(pad_mask))
+        if n_pad > 0:
+            for ax in (ax_input, ax_pred):
+                ov = np.zeros((h, w, 4), dtype=np.float32)
+                ov[pad_mask] = (0.95, 0.15, 0.65, 0.55)
+                ax.imshow(ov, origin="upper", interpolation="nearest", zorder=2)
+            ax_input.set_title("Input (magenta = padded band, -1)")
+        else:
+            ax_input.set_title(
+                "Input (no padded band — region is a multiple of tile size)"
+            )
+    else:
+        ax_input.set_title("Input (full region, normalized grayscale)")
+    ax_input.set_xlabel("x (column)")
+    ax_input.set_ylabel("y (row)")
     cbar0 = fig.colorbar(im0, ax=ax_input, ticks=[-1, 0, 1], fraction=0.046, pad=0.04)
     cbar0.set_ticklabels(["-1", "0", "1"])
 
-    im1 = ax_pred.imshow(predicted_image, cmap="viridis", vmin=0, vmax=1, origin="upper")
-    ax_pred.set_title("Predicted classification (stitched tiles)")
-    ax_pred.set_xlabel("x")
-    ax_pred.set_ylabel("y")
+    im1 = ax_pred.imshow(
+        predicted_image, cmap="viridis", vmin=0, vmax=1, origin="upper", zorder=1
+    )
+    if region_size_hw is not None:
+        if n_pad > 0:
+            ax_pred.set_title("Predicted (magenta = same padded band)")
+        else:
+            ax_pred.set_title(
+                "Predicted (no padded band — canvas matches region)"
+            )
+    else:
+        ax_pred.set_title("Predicted classification (stitched tiles)")
+    ax_pred.set_xlabel("x (column)")
+    ax_pred.set_ylabel("y (row)")
     cmap = plt.get_cmap("viridis")
     ax_pred.legend(
         handles=[
@@ -1161,6 +1251,20 @@ def plot_full_image_vs_classification(input_image, predicted_image, out_name):
     for ax in (ax_input, ax_pred):
         ax.set_xticks(xt)
         ax.set_yticks(yt)
+
+    if region_size_hw is not None and tile_size_hw is not None:
+        rh_s, rw_s = int(region_size_hw[0]), int(region_size_hw[1])
+        th_s, tw_s = int(tile_size_hw[0]), int(tile_size_hw[1])
+        cap = (
+            f"Canvas {w}×{h} px, region {rw_s}×{rh_s} px, tile {tw_s}×{th_s} px. "
+            f"Padded pixels (beyond region): {n_pad}."
+        )
+        if n_pad == 0:
+            cap += (
+                " No extra band — width and height are multiples of the tile size, "
+                "so the tile grid fills the region exactly."
+            )
+        fig.suptitle(cap, fontsize=9, y=1.02)
 
     fig.tight_layout()
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
@@ -1380,13 +1484,13 @@ if __name__ == "__main__":
         "--tile-width",
         type=int,
         default=4,
-        help="Tile width in pixels for test 4 (grid step; must divide trimmed region).",
+        help="Tile width in pixels for test 4 (grid step; edge tiles padded with -1.0 if needed).",
     )
     parser.add_argument(
         "--tile-height",
         type=int,
         default=4,
-        help="Tile height in pixels for test 4 (grid step; must divide trimmed region).",
+        help="Tile height in pixels for test 4 (grid step; edge tiles padded with -1.0 if needed).",
     )
     parser.add_argument(
         "--image-x-offset",
@@ -1418,7 +1522,7 @@ if __name__ == "__main__":
         choices=("auto_median", "auto_median_tile", "fixed"),
         default="auto_median",
         help=(
-            "auto_median: median of all pixels in the trimmed region (one isovalue for every tile). "
+            "auto_median: median of all pixels in the region (one isovalue for every tile). "
             "auto_median_tile: same as auto_median. fixed: use --isovalue for every tile."
         ),
     )
