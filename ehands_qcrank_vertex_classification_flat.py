@@ -512,6 +512,65 @@ def run_sim_job_qcrank(eqd, sim, n_shots = 2**12, verbose=False):
     return countsL
 
 
+def _image_region_dimensions(
+    image_path,
+    image_x_offset,
+    image_y_offset,
+    region_width=None,
+    region_height=None,
+):
+    """
+    Return (region_width, region_height) in pixels for the rectangle starting at
+    (image_x_offset, image_y_offset), optionally capped by explicit width/height.
+    """
+    image = Image.open(image_path)
+    max_w = image.width - image_x_offset
+    max_h = image.height - image_y_offset
+    if max_w <= 0 or max_h <= 0:
+        raise ValueError(
+            f"Offset ({image_x_offset}, {image_y_offset}) leaves no region in image "
+            f"({image.width}x{image.height})."
+        )
+    rw = region_width if region_width is not None else max_w
+    rh = region_height if region_height is not None else max_h
+    if rw <= 0 or rh <= 0:
+        raise ValueError("region_width and region_height must be positive when set.")
+    if rw > max_w or rh > max_h:
+        raise ValueError(
+            f"Requested region {rw}x{rh} from offset ({image_x_offset}, {image_y_offset}) "
+            f"exceeds image bounds (available {max_w}x{max_h})."
+        )
+    return rw, rh
+
+
+def auto_isovalue_median(normalized_pixels_1d):
+    """
+    Robust threshold in [-1, 1] for normalized QCrank inputs: median intensity.
+    Used as `VertexClassifier.isovalue` (argument to ry(arccos(isovalue))).
+    """
+    flat = np.asarray(normalized_pixels_1d, dtype=np.float64).ravel()
+    v = float(np.median(flat))
+    return float(np.clip(v, -1.0, 1.0))
+
+
+def load_normalized_grayscale_region(image_path, image_x_offset, image_y_offset, width, height):
+    """
+    Crop a rectangle from the image and return (height, width) float32 in [-1, 1],
+    same normalization as DataInfo.image_to_data.
+    """
+    image = Image.open(image_path).convert("L")
+    image = image.crop(
+        (
+            image_x_offset,
+            image_y_offset,
+            image_x_offset + width,
+            image_y_offset + height,
+        )
+    )
+    data = np.asarray(image, dtype=np.float32)
+    return (data / 127.5) - 1.0
+
+
 #--------------------------------Tests--------------------------------#
 def test_qcrank_ehands_c_classify_flat(n_cubes, isovalue, weight, sim):
     print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE")
@@ -832,92 +891,191 @@ def test_qcrank_ehands_c_classify_flat_mult(n_cubes, isovalue, weight, sim):
     print("Returning data and recovered data lists")
     return all_rec_list, all_data_list
     
-def test_qcrank_ehands_c_classify_flat_image(n_cubes, isovalue, weight, sim, image_path, image_width, image_height):
-    print("RUNNING TEST: CLASSICAL CLASSIFICATION WITH FLAT DATA STRUCTURE")
-    print(f"inputs (n_cubes: {n_cubes}, isovalue: {isovalue}, weight: {weight})")
-    verbose = True
-    
-    # One list per data-qubit channel (matches DataInfo.nq_data and construct_data_lists).
+def test_qcrank_ehands_c_classify_flat_image(
+    n_cubes,
+    isovalue,
+    weight,
+    sim,
+    image_path,
+    tile_width,
+    tile_height,
+    image_x_offset=0,
+    image_y_offset=0,
+    region_width=None,
+    region_height=None,
+    isovalue_mode="auto_median",
+    inside_bias=0.06,
+):
+    """
+    Classify image data in non-overlapping tiles of size tile_width x tile_height.
+
+    isovalue_mode:
+      - 'auto_median' (or legacy 'auto_median_tile'): one isovalue for the whole image,
+        the median of all normalized pixels in the trimmed region (constant per tile).
+      - 'fixed': use the provided `isovalue` for every tile.
+
+    inside_bias: subtracted from that isovalue (clipped to [-1, 1]). With weight 0.5,
+      class 0 ('inside') requires val >= isovalue, so a positive bias lowers the
+      threshold and yields more 'inside' classifications.
+
+    The region processed starts at (image_x_offset, image_y_offset); its size is
+    region_width x region_height if given, otherwise the remaining image extent.
+    The region is trimmed to a multiple of the tile size so all tiles are full.
+    """
+    if isovalue_mode == "auto_median_tile":
+        isovalue_mode = "auto_median"
+
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
+    print(
+        f"inputs (n_cubes: {n_cubes}, weight: {weight}, tile: {tile_width}x{tile_height}, "
+        f"region origin ({image_x_offset}, {image_y_offset}), isovalue_mode={isovalue_mode})"
+    )
+    if isovalue_mode == "fixed":
+        print(f"  fixed isovalue (all tiles): {isovalue}")
+
+    rw, rh = _image_region_dimensions(
+        image_path, image_x_offset, image_y_offset, region_width, region_height
+    )
+    n_tx = rw // tile_width
+    n_ty = rh // tile_height
+    if n_tx < 1 or n_ty < 1:
+        raise ValueError(
+            f"Tile {tile_width}x{tile_height} does not fit in region {rw}x{rh}."
+        )
+    trim_w = n_tx * tile_width
+    trim_h = n_ty * tile_height
+    if trim_w != rw or trim_h != rh:
+        print(
+            f"Note: trimming region from {rw}x{rh} to {trim_w}x{trim_h} "
+            f"({n_tx}x{n_ty} full tiles)."
+        )
+
+    n_tiles = n_tx * n_ty
+    print(f"Processing {n_tiles} tiles ({n_tx}x{n_ty}) over image region {trim_w}x{trim_h}.")
+
+    region_gray = load_normalized_grayscale_region(
+        image_path, image_x_offset, image_y_offset, trim_w, trim_h
+    )
+    if isovalue_mode == "auto_median":
+        iso_before_bias = auto_isovalue_median(region_gray.ravel())
+        print(f"Auto-selected isovalue (median of full region, all tiles): {iso_before_bias:.4f}")
+    elif isovalue_mode == "fixed":
+        iso_before_bias = float(isovalue)
+    else:
+        raise ValueError(
+            f"Unknown isovalue_mode {isovalue_mode!r}; use 'auto_median', 'auto_median_tile', or 'fixed'."
+        )
+
+    image_isovalue = float(np.clip(iso_before_bias - inside_bias, -1.0, 1.0))
+    if inside_bias != 0.0:
+        print(
+            f"Inside bias: effective isovalue = median/fixed ({iso_before_bias:.4f}) "
+            f"- inside_bias ({inside_bias:.4f}) = {image_isovalue:.4f} (more 'inside' / class 0)"
+        )
+
+    full_gray = region_gray.astype(np.float32, copy=True)
+    full_pred = np.zeros((trim_h, trim_w), dtype=np.int32)
+
     nq_data = 1
     all_data_list = [[] for _ in range(nq_data)]
     all_rec_list = [[] for _ in range(nq_data)]
 
-    # Accumulate statistics over all iterations
-    agg_counts = {'0': 0, '1': 0}
+    agg_counts = {"0": 0, "1": 0}
     cm_list = []
     acc_list = []
     all_correct_vals = []
     all_incorrect_vals = []
-  
-    for _ in range(1):
-        # initialize data and isovalue arrays
-        vc = VertexClassifier(n_cubes, isovalue)
-        vc.init_data(use_image=True, image_path=image_path, image_width=image_width, image_height=image_height, image_x_offset=36, image_y_offset=0)
-        vc.encode_c_classify(verbose)
 
-        # add iso value qubit 
-        vc.compose_iso_qubits(weight, verbose)
+    tile_index = 0
+    for ty in range(n_ty):
+        for tx in range(n_tx):
+            x_off = image_x_offset + tx * tile_width
+            y_off = image_y_offset + ty * tile_height
+            verbose = tile_index == 0
 
-        # Add measurement
-        vc.add_meas(q_classify=False, c_classify=True)
+            vc = VertexClassifier(n_cubes, 0.0)
+            vc.init_data(
+                use_image=True,
+                image_path=image_path,
+                image_width=tile_width,
+                image_height=tile_height,
+                image_x_offset=x_off,
+                image_y_offset=y_off,
+            )
 
-        # Run Simulation
-        n_shots = vc.di.n_data * (2**12)
-        countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+            vc.isovalue = image_isovalue
 
-        # Recover the data from QC
-        all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(n_shots, countsL, all_data_list, all_rec_list, verbose)
+            vc.encode_c_classify(verbose)
+            vc.compose_iso_qubits(weight, verbose)
+            vc.add_meas(q_classify=False, c_classify=True)
 
-        classifications = vc.c_classify(all_rec_list)
-        comp = vc.compare_against_input(classifications, weight)
+            n_shots = vc.di.n_data * (2**12)
+            countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
-        cm_list.append(comp["confusion_matrix"])
-        acc_list.append(comp["accuracy"])
+            all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(
+                n_shots, countsL, all_data_list, all_rec_list, verbose
+            )
 
-        data_vals = vc.di.data_inp[:, 0, 0]
-        # Subtraction value used for the "true" label:
-        #   subtraction_val = weight * input_val - (1 - weight) * isolevel
-        subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+            classifications = vc.c_classify(all_rec_list)
+            comp = vc.compare_against_input(classifications, weight)
 
-        correct_vals, incorrect_vals = print_per_datapoint_classification_table(
-            data_vals=data_vals,
-            subtraction_vals=subtraction_vals,
-            y_true=comp["y_true"],
-            y_pred=comp["y_pred"],
-        )
-        if correct_vals is not None:
-            all_correct_vals.append(correct_vals)
-        if incorrect_vals is not None:
-            all_incorrect_vals.append(incorrect_vals)
+            cm_list.append(comp["confusion_matrix"])
+            acc_list.append(comp["accuracy"])
 
-        # Aggregate class counts over all iterations
-        agg_counts["0"] += int(np.sum(classifications == 0))
-        agg_counts["1"] += int(np.sum(classifications == 1))
+            data_vals = vc.di.data_inp[:, 0, 0]
+            subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
 
-        # Analyze the residuals
-        #vc.analyze_all_qcrank_residuals(data_rec, verbose=verbose)
-        
-        # verbose for first iteration only
-        verbose = False
-    
+            print_tile_table = n_tiles == 1 and vc.di.n_data <= 64
+            if print_tile_table:
+                correct_vals, incorrect_vals = print_per_datapoint_classification_table(
+                    data_vals=data_vals,
+                    subtraction_vals=subtraction_vals,
+                    y_true=comp["y_true"],
+                    y_pred=comp["y_pred"],
+                )
+                if correct_vals is not None:
+                    all_correct_vals.append(correct_vals)
+                if incorrect_vals is not None:
+                    all_incorrect_vals.append(incorrect_vals)
+            else:
+                y_t = np.asarray(comp["y_true"]).reshape(-1)
+                y_p = np.asarray(comp["y_pred"]).reshape(-1)
+                sub = np.asarray(subtraction_vals).reshape(-1)
+                correct_mask = y_t == y_p
+                incorrect_mask = ~correct_mask
+                if np.any(correct_mask):
+                    all_correct_vals.append(sub[correct_mask])
+                if np.any(incorrect_mask):
+                    all_incorrect_vals.append(sub[incorrect_mask])
+
+            agg_counts["0"] += int(np.sum(classifications == 0))
+            agg_counts["1"] += int(np.sum(classifications == 1))
+
+            pred_tile = np.asarray(comp["y_pred"], dtype=int).reshape(
+                tile_height, tile_width
+            )
+            y0, y1 = ty * tile_height, (ty + 1) * tile_height
+            x0, x1 = tx * tile_width, (tx + 1) * tile_width
+            full_pred[y0:y1, x0:x1] = pred_tile
+
+            tile_index += 1
+
     plot_classification_summary_figure(
         acc_list=acc_list,
         cm_list=cm_list,
         agg_counts=agg_counts,
         all_correct_vals=all_correct_vals,
         all_incorrect_vals=all_incorrect_vals,
-        out_name="flat_c_classification_summary_10x_shots.png",
+        out_name="flat_c_classification_summary_full_image_tiles.png",
         bins=20,
     )
-    input_tile = vc.di.data_inp[:vc.di.n_data, 0, 0].reshape(image_height, image_width)
-    predicted_tile = np.asarray(comp["y_pred"], dtype=int).reshape(image_height, image_width)
-    plot_input_tile_and_classification(
-        input_tile=input_tile,
-        predicted_tile=predicted_tile,
-        out_name="flat_c_image_tile_vs_classification.png",
+    plot_full_image_vs_classification(
+        full_gray,
+        full_pred,
+        out_name="flat_c_full_image_vs_classification.png",
     )
-    
-    print("Returning data and recovered data lists")
+
+    print("Returning data and recovered data lists (last tile only)")
     return all_rec_list, all_data_list
 
 
@@ -957,6 +1115,56 @@ def plot_input_tile_and_classification(input_tile, predicted_tile, out_name):
     fig.tight_layout()
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
     print(f"Saved image tile comparison plot to: {out_name}")
+
+
+def plot_full_image_vs_classification(input_image, predicted_image, out_name):
+    """
+    Side-by-side full region: normalized grayscale input and stitched per-tile predictions.
+    """
+    input_image = np.asarray(input_image, dtype=np.float32)
+    predicted_image = np.asarray(predicted_image, dtype=np.int32)
+    h, w = input_image.shape
+    fig_w = min(22.0, max(10.0, w / 32.0 + 4.0))
+    fig_h = min(14.0, max(5.0, h / 32.0 + 2.0))
+    fig, axes = plt.subplots(1, 2, figsize=(2.0 * fig_w, fig_h))
+
+    ax_input, ax_pred = axes
+    im0 = ax_input.imshow(input_image, cmap="gray", vmin=-1.0, vmax=1.0, origin="upper")
+    ax_input.set_title("Input (full region, normalized grayscale)")
+    ax_input.set_xlabel("x")
+    ax_input.set_ylabel("y")
+    cbar0 = fig.colorbar(im0, ax=ax_input, ticks=[-1, 0, 1], fraction=0.046, pad=0.04)
+    cbar0.set_ticklabels(["-1", "0", "1"])
+
+    im1 = ax_pred.imshow(predicted_image, cmap="viridis", vmin=0, vmax=1, origin="upper")
+    ax_pred.set_title("Predicted classification (stitched tiles)")
+    ax_pred.set_xlabel("x")
+    ax_pred.set_ylabel("y")
+    cmap = plt.get_cmap("viridis")
+    ax_pred.legend(
+        handles=[
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="0 = inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="1 = outside"),
+        ],
+        loc="upper right",
+        framealpha=0.95,
+    )
+
+    def _axis_ticks(n, max_ticks=17):
+        if n <= max_ticks:
+            return np.arange(n)
+        step = max(1, int(np.ceil(n / max_ticks)))
+        return np.arange(0, n, step)
+
+    xt = _axis_ticks(w)
+    yt = _axis_ticks(h)
+    for ax in (ax_input, ax_pred):
+        ax.set_xticks(xt)
+        ax.set_yticks(yt)
+
+    fig.tight_layout()
+    fig.savefig(out_name, bbox_inches="tight", dpi=150)
+    print(f"Saved full image vs classification plot to: {out_name}")
 
 
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
@@ -1162,11 +1370,78 @@ if __name__ == "__main__":
             "Which test to run: 1=c_classify_flat, 2=c_classify_flat_mult, 3=c_classify_flat_ancilla, 4=c_classify_flat_image"
         ),
     )
+    parser.add_argument(
+        "--image-path",
+        type=str,
+        default="test_images/Plant_tissue_sections_64x64.jpg",
+        help="Image file for test 4 (tiled over region from offset; see --region-*).",
+    )
+    parser.add_argument(
+        "--tile-width",
+        type=int,
+        default=4,
+        help="Tile width in pixels for test 4 (grid step; must divide trimmed region).",
+    )
+    parser.add_argument(
+        "--tile-height",
+        type=int,
+        default=4,
+        help="Tile height in pixels for test 4 (grid step; must divide trimmed region).",
+    )
+    parser.add_argument(
+        "--image-x-offset",
+        type=int,
+        default=0,
+        help="Left edge of crop region for test 4.",
+    )
+    parser.add_argument(
+        "--image-y-offset",
+        type=int,
+        default=0,
+        help="Top edge of the tiled region (upper-left corner of region).",
+    )
+    parser.add_argument(
+        "--region-width",
+        type=int,
+        default=None,
+        help="Width of region to cover with tiles (default: to right edge of image).",
+    )
+    parser.add_argument(
+        "--region-height",
+        type=int,
+        default=None,
+        help="Height of region to cover with tiles (default: to bottom edge of image).",
+    )
+    parser.add_argument(
+        "--isovalue-mode",
+        type=str,
+        choices=("auto_median", "auto_median_tile", "fixed"),
+        default="auto_median",
+        help=(
+            "auto_median: median of all pixels in the trimmed region (one isovalue for every tile). "
+            "auto_median_tile: same as auto_median. fixed: use --isovalue for every tile."
+        ),
+    )
+    parser.add_argument(
+        "--isovalue",
+        type=float,
+        default=-0.5,
+        help="Isovalue for tests 1–3 and for image test when --isovalue-mode fixed.",
+    )
+    parser.add_argument(
+        "--inside-bias",
+        type=float,
+        default=0.06,
+        help=(
+            "Test 4 only: subtract this from the chosen isovalue (after auto median or fixed). "
+            "Positive values favor class 0 ('inside'). Use 0 to disable. Default: 0.06."
+        ),
+    )
     args = parser.parse_args()
     test_num = args.test_num
 
     n_cubes = 4
-    isovalue = -0.5
+    isovalue = args.isovalue
     weight = 0.5
 
     sims = ["AerSimulator", "FakeTorino", "FakeMarrakesh"]
@@ -1184,7 +1459,21 @@ if __name__ == "__main__":
         case 3:
             all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_ancilla(n_cubes, isovalue, weight, sim)
         case 4:
-            all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_image(n_cubes, isovalue, weight, sim, image_path="test_images/Plant_tissue_sections_-_39815344093.jpg", image_width=4, image_height=4)
+            all_rec_list, all_data_list = test_qcrank_ehands_c_classify_flat_image(
+                n_cubes,
+                isovalue,
+                weight,
+                sim,
+                image_path=args.image_path,
+                tile_width=args.tile_width,
+                tile_height=args.tile_height,
+                image_x_offset=args.image_x_offset,
+                image_y_offset=args.image_y_offset,
+                region_width=args.region_width,
+                region_height=args.region_height,
+                isovalue_mode=args.isovalue_mode,
+                inside_bias=args.inside_bias,
+            )
         case _:
             print("Invalid test number or no test specified")
             sys.exit(1)
