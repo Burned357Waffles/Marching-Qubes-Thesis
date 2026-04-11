@@ -904,7 +904,7 @@ def test_qcrank_ehands_c_classify_flat_image(
     region_width=None,
     region_height=None,
     isovalue_mode="auto_median",
-    inside_bias=0.06,
+    inside_bias=0,
 ):
     """
     Classify image data in non-overlapping tiles of size tile_width x tile_height.
@@ -1431,7 +1431,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--inside-bias",
         type=float,
-        default=0.06,
+        default=0.0,
         help=(
             "Test 4 only: subtract this from the chosen isovalue (after auto median or fixed). "
             "Positive values favor class 0 ('inside'). Use 0 to disable. Default: 0.06."
