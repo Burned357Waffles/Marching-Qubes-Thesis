@@ -1112,15 +1112,17 @@ def test_qcrank_ehands_c_classify_flat_image(
         agg_counts=agg_counts,
         all_correct_vals=all_correct_vals,
         all_incorrect_vals=all_incorrect_vals,
-        out_name="flat_c_classification_summary_full_image_tiles.png",
+        out_name=f"classification_summaries/flat_c_classification_summary_full_image_tiles_{rw}x{rh}.png",
         bins=20,
     )
     plot_full_image_vs_classification(
         padded_canvas_gray,
         padded_canvas_pred,
-        out_name="flat_c_full_image_vs_classification.png",
+        out_name=f"side-by-sides/flat_c_full_image_vs_classification_{rw}x{rh}.png",
         region_size_hw=(rh, rw),
         tile_size_hw=(tile_height, tile_width),
+        isovalue=image_isovalue,
+        n_tiles=n_tiles,
     )
 
     print("Returning data and recovered data lists (last tile only)")
@@ -1170,8 +1172,10 @@ def plot_full_image_vs_classification(
     predicted_image,
     out_name,
     *,
+    isovalue=None,
     region_size_hw=None,
     tile_size_hw=None,
+    n_tiles=None,
 ):
     """
     Side-by-side: normalized grayscale input and per-tile predictions.
@@ -1252,21 +1256,36 @@ def plot_full_image_vs_classification(
         ax.set_xticks(xt)
         ax.set_yticks(yt)
 
-    if region_size_hw is not None and tile_size_hw is not None:
+    has_canvas_caption = (
+        region_size_hw is not None and tile_size_hw is not None
+    )
+    if has_canvas_caption:
         rh_s, rw_s = int(region_size_hw[0]), int(region_size_hw[1])
         th_s, tw_s = int(tile_size_hw[0]), int(tile_size_hw[1])
         cap = (
             f"Canvas {w}×{h} px, region {rw_s}×{rh_s} px, tile {tw_s}×{th_s} px. "
-            f"Padded pixels (beyond region): {n_pad}."
+            f"Padded pixels (beyond region): {n_pad}. "
+            f"Number of tiles: {n_tiles}. "
+            f"Isovalue: {isovalue:.3f}"
         )
         if n_pad == 0:
             cap += (
                 " No extra band — width and height are multiples of the tile size, "
                 "so the tile grid fills the region exactly."
             )
-        fig.suptitle(cap, fontsize=9, y=1.02)
 
-    fig.tight_layout()
+    if has_canvas_caption:
+        fig.tight_layout(rect=[0, 0, 1, 0.90])
+    else:
+        fig.tight_layout()
+
+    if has_canvas_caption:
+        fig.canvas.draw()
+        p_in = ax_input.get_position()
+        p_pr = ax_pred.get_position()
+        x_mid = (p_in.x0 + p_pr.x1) / 2.0
+        fig.suptitle(cap, fontsize=9, ha="center", x=x_mid, y=0.96)
+
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
     print(f"Saved full image vs classification plot to: {out_name}")
 
