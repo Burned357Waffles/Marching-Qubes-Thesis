@@ -183,12 +183,16 @@ class EncodedQData:
 class VertexClassifier:
     def __init__(self, isovalue):
         self.isovalue = isovalue
+        self.classification_threshold = 0.0
+        self.uses_method3 = False
 
         self.di = None
         self.eqd = None
         self.qc_main = None
 
     def ehands_addition(self, qc, q_a, q_b, weight, negation=False, verbose=False):
+        if not (0.0 <= float(weight) <= 1.0):
+            raise ValueError(f"weight must be in range [0, 1], got {weight}")
         alpha = np.arccos(1 - 2 * weight)
 
         qc_add = QuantumCircuit(2)
@@ -206,7 +210,11 @@ class VertexClassifier:
 
     def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, negation=True, verbose=False):
         qc_iso = QuantumCircuit(1, 1)
-        qc_iso.ry(np.arccos(self.isovalue), 0)
+        if self.uses_method3:
+            # Method 3 uses a constant +1 contribution on the second operand.
+            qc_iso.x(0)
+        else:
+            qc_iso.ry(np.arccos(self.isovalue), 0)
 
         qc.compose(qc_iso, placement_q, inplace=True)
 
@@ -276,15 +284,20 @@ class VertexClassifier:
     def c_classify(self, all_rec_list):
         latest = [subl[-1] for subl in all_rec_list]
         rec = np.concatenate(latest, axis=1)
-        classifications = np.where(rec[:, 0, 0] >= 0, 0, 1)
+        classifications = np.where(rec[:, 0, 0] >= self.classification_threshold, 0, 1)
         return classifications
 
     def compare_against_input(self, pred_classes, weight):
         y_pred = np.asarray(pred_classes, dtype=int).reshape(-1)
 
         vals = self.di.data_inp[:, 0, 0]
-        subtraction_vals = weight * vals - (1.0 - weight) * self.isovalue
-        y_true = np.where(subtraction_vals >= 0, 0, 1).astype(int)
+        if self.uses_method3:
+            # Method 3 is equivalent to thresholding x' against t' directly.
+            subtraction_vals = vals - self.isovalue
+            y_true = np.where(subtraction_vals >= 0.0, 0, 1).astype(int)
+        else:
+            subtraction_vals = weight * vals - (1.0 - weight) * self.isovalue
+            y_true = np.where(subtraction_vals >= 0.0, 0, 1).astype(int)
 
         if y_pred.shape[0] != y_true.shape[0]:
             raise ValueError(
@@ -450,6 +463,7 @@ def qcrank_ehands_vertex_classification_image(
     region_width=None,
     region_height=None,
     isovalue_mode="auto_median",
+    classification_mode="auto",
     inside_bias=0,
     save_name=None,
 ):
@@ -514,6 +528,52 @@ def qcrank_ehands_vertex_classification_image(
             f"- inside_bias ({inside_bias:.4f}) = {image_isovalue:.4f} (more 'inside' / class 0)"
         )
 
+    if classification_mode not in ("auto", "1", "3"):
+        raise ValueError("classification_mode must be one of: 'auto', '1', '3'.")
+
+    if classification_mode == "auto":
+        use_method3 = image_isovalue < 0.5
+    elif classification_mode == "3":
+        use_method3 = True
+    else:
+        use_method3 = False
+
+    print(f"Classification mode: {classification_mode}")
+    if use_method3:
+        if image_isovalue >= 1.0:
+            raise ValueError("Method 3 requires isovalue t < 1.0 for w = 1/(1-t).")
+        candidate_w = 1.0 / (1.0 - image_isovalue)
+        if 0.0 <= candidate_w <= 1.0:
+            method3_weight = candidate_w
+            region_proc = (region_gray + 1.0) / 2.0
+            image_isovalue_proc = (image_isovalue + 1.0) / 2.0
+            class_threshold = 0.5
+            print(
+                "Method 3 enabled: shifted x,t from [-1,1] to [0,1], "
+                f"classification threshold set to 0.5, and weight set to w=1/(1-t)={method3_weight:.4f}."
+            )
+        else:
+            if classification_mode == "3":
+                raise ValueError(
+                    "Method 3 was forced on, but computed w=1/(1-t)="
+                    f"{candidate_w:.4f} is outside [0,1]. "
+                    "Choose --classification-mode 1/auto or adjust isovalue/inside-bias."
+                )
+            use_method3 = False
+            method3_weight = weight
+            region_proc = region_gray
+            image_isovalue_proc = image_isovalue
+            class_threshold = 0.0
+            print(
+                "Method 3 skipped: computed w=1/(1-t)="
+                f"{candidate_w:.4f}, which is outside [0,1]. Falling back to baseline method."
+            )
+    else:
+        method3_weight = weight
+        region_proc = region_gray
+        image_isovalue_proc = image_isovalue
+        class_threshold = 0.0
+
     canvas_h = n_ty * tile_height
     canvas_w = n_tx * tile_width
     padded_canvas_gray = np.full((canvas_h, canvas_w), -1.0, dtype=np.float32)
@@ -540,8 +600,9 @@ def qcrank_ehands_vertex_classification_image(
             y1 = min(y0 + tile_height, rh)
             w_sub = x1 - x0
             h_sub = y1 - y0
-            padded_tile = np.full((tile_height, tile_width), -1.0, dtype=np.float32)
-            padded_tile[:h_sub, :w_sub] = region_gray[y0:y1, x0:x1]
+            pad_value = 0.0 if use_method3 else -1.0
+            padded_tile = np.full((tile_height, tile_width), pad_value, dtype=np.float32)
+            padded_tile[:h_sub, :w_sub] = region_proc[y0:y1, x0:x1]
 
             vc = VertexClassifier(0.0)
             vc.init_data(
@@ -553,10 +614,12 @@ def qcrank_ehands_vertex_classification_image(
                 image_y_offset=0,
             )
 
-            vc.isovalue = image_isovalue
+            vc.isovalue = image_isovalue_proc
+            vc.classification_threshold = class_threshold
+            vc.uses_method3 = use_method3
 
             vc.encode_c_classify(verbose)
-            vc.compose_iso_qubits(weight, verbose)
+            vc.compose_iso_qubits(method3_weight, verbose)
             vc.add_meas()
 
             n_shots = vc.di.n_data * (2**12)
@@ -573,7 +636,10 @@ def qcrank_ehands_vertex_classification_image(
             acc_list.append(comp["accuracy"])
 
             data_vals = vc.di.data_inp[:, 0, 0]
-            subtraction_vals = weight * data_vals - (1.0 - weight) * vc.isovalue
+            if use_method3:
+                subtraction_vals = data_vals - vc.isovalue
+            else:
+                subtraction_vals = method3_weight * data_vals - (1.0 - method3_weight) * vc.isovalue
 
             print_tile_table = n_tiles == 1 and vc.di.n_data <= 64
             if print_tile_table:
@@ -640,9 +706,10 @@ def qcrank_ehands_vertex_classification_image(
         padded_canvas_gray,
         padded_canvas_pred,
         out_name=side_by_side_out,
+        input_value_range=(0.0, 1.0) if use_method3 else (-1.0, 1.0),
         region_size_hw=(rh, rw),
         tile_size_hw=(tile_height, tile_width),
-        isovalue=image_isovalue,
+        isovalue=image_isovalue_proc,
         n_tiles=n_tiles,
     )
 
@@ -658,6 +725,7 @@ def plot_full_image_vs_classification(
     predicted_image,
     out_name,
     *,
+    input_value_range=(-1.0, 1.0),
     isovalue=None,
     region_size_hw=None,
     tile_size_hw=None,
@@ -671,7 +739,10 @@ def plot_full_image_vs_classification(
     fig, axes = plt.subplots(1, 2, figsize=(2.0 * fig_w, fig_h))
 
     ax_input, ax_pred = axes
-    im0 = ax_input.imshow(input_image, cmap="gray", vmin=-1.0, vmax=1.0, origin="upper", zorder=1)
+    in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
+    im0 = ax_input.imshow(
+        input_image, cmap="gray", vmin=in_vmin, vmax=in_vmax, origin="upper", zorder=1
+    )
 
     n_pad = 0
     if region_size_hw is not None:
@@ -694,8 +765,10 @@ def plot_full_image_vs_classification(
         ax_input.set_title("Input (full region, normalized grayscale)")
     ax_input.set_xlabel("x (column)")
     ax_input.set_ylabel("y (row)")
-    cbar0 = fig.colorbar(im0, ax=ax_input, ticks=[-1, 0, 1], fraction=0.046, pad=0.04)
-    cbar0.set_ticklabels(["-1", "0", "1"])
+    cbar0 = fig.colorbar(
+        im0, ax=ax_input, ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax], fraction=0.046, pad=0.04
+    )
+    cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
 
     im1 = ax_pred.imshow(
         predicted_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
@@ -1000,6 +1073,18 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--classification-mode",
+        type=str,
+        choices=("auto", "1", "3"),
+        default="auto",
+        help=(
+            "Classification method selection mode. "
+            "auto: enable Method 3 when isovalue < 0.5 (with safety fallback if w is invalid). "
+            "1: always use Method 1 baseline. "
+            "3: force Method 3 regardless of isovalue (errors if w is outside [0,1])."
+        ),
+    )
+    parser.add_argument(
         "--save-name",
         type=str,
         default=None,
@@ -1023,6 +1108,7 @@ if __name__ == "__main__":
         region_width=args.region_width,
         region_height=args.region_height,
         isovalue_mode=args.isovalue_mode,
+        classification_mode=args.classification_mode,
         inside_bias=args.inside_bias,
         save_name=args.save_name,
     )
