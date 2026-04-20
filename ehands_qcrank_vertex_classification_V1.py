@@ -416,23 +416,23 @@ def classification_output_paths(
     tile_height: int,
     image_x_offset: int,
     image_y_offset: int,
+    save_name: str,
 ) -> tuple[str, str]:
     """
     Paths under classification_summaries/ and side-by-sides/ with a unique name
     derived from the source image file, crop offset, region size, and tile size.
     """
-    stem = _safe_image_stem(image_path)
-    tag = (
-        f"{stem}_off{image_x_offset}x{image_y_offset}_{rw}x{rh}_"
-        f"tile{tile_width}x{tile_height}"
-    )
     summary_dir = "classification_summaries"
     side_dir = "side-by-sides"
-    os.makedirs(summary_dir, exist_ok=True)
-    os.makedirs(side_dir, exist_ok=True)
-    summary_png = os.path.join(summary_dir, f"classification_summary_{tag}.png")
-    side_png = os.path.join(side_dir, f"image_vs_classification_side_by_side_{tag}.png")
-    return summary_png, side_png
+    if save_name is not None:
+        return summary_dir + "/" + save_name + "_classification_summary.png", side_dir + "/" + save_name + "_image_vs_classification_side_by_side.png"
+    else:
+        stem = _safe_image_stem(image_path)
+        tag = (
+            f"{stem}_off{image_x_offset}x{image_y_offset}_{rw}x{rh}_"
+            f"tile{tile_width}x{tile_height}"
+        )
+        return summary_dir + "/" + f"classification_summary_{tag}.png", side_dir + "/" + f"image_vs_classification_side_by_side_{tag}.png"
 
 
 # -------------------------------- Test --------------------------------
@@ -451,6 +451,7 @@ def qcrank_ehands_vertex_classification_image(
     region_height=None,
     isovalue_mode="auto_median",
     inside_bias=0,
+    save_name=None,
 ):
     """
     Classify image data in non-overlapping tiles of size tile_width x tile_height.
@@ -621,6 +622,7 @@ def qcrank_ehands_vertex_classification_image(
         tile_height,
         image_x_offset,
         image_y_offset,
+        save_name,
     )
     print(f"Saving classification summary to: {summary_out}")
     print(f"Saving side-by-side figure to: {side_by_side_out}")
@@ -933,7 +935,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--image-path",
         type=str,
-        default="test_images/Plant_tissue_sections_64x64.jpg",
+        default="test_images/Plant_tissue_sections_64x64.png",
         help="Image file (tiled over region from offset; see --region-*).",
     )
     parser.add_argument(
@@ -997,6 +999,12 @@ if __name__ == "__main__":
             "Positive values favor class 0 ('inside'). Use 0 to disable."
         ),
     )
+    parser.add_argument(
+        "--save-name",
+        type=str,
+        default=None,
+        help="Path to save the results.",
+    )
     args = parser.parse_args()
 
     weight = 0.5
@@ -1016,4 +1024,5 @@ if __name__ == "__main__":
         region_height=args.region_height,
         isovalue_mode=args.isovalue_mode,
         inside_bias=args.inside_bias,
+        save_name=args.save_name,
     )
