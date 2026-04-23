@@ -543,31 +543,24 @@ def qcrank_ehands_vertex_classification_image(
         if image_isovalue >= 1.0:
             raise ValueError("Method 3 requires isovalue t < 1.0 for w = 1/(1-t).")
         candidate_w = 1.0 / (1.0 - image_isovalue)
-        if 0.0 <= candidate_w <= 1.0:
-            method3_weight = candidate_w
-            region_proc = (region_gray + 1.0) / 2.0
-            image_isovalue_proc = (image_isovalue + 1.0) / 2.0
-            class_threshold = 0.5
-            print(
-                "Method 3 enabled: shifted x,t from [-1,1] to [0,1], "
-                f"classification threshold set to 0.5, and weight set to w=1/(1-t)={method3_weight:.4f}."
-            )
-        else:
-            if classification_mode == "3":
-                raise ValueError(
-                    "Method 3 was forced on, but computed w=1/(1-t)="
-                    f"{candidate_w:.4f} is outside [0,1]. "
-                    "Choose --classification-mode 1/auto or adjust isovalue/inside-bias."
-                )
-            use_method3 = False
-            method3_weight = weight
-            region_proc = region_gray
-            image_isovalue_proc = image_isovalue
-            class_threshold = 0.0
-            print(
-                "Method 3 skipped: computed w=1/(1-t)="
-                f"{candidate_w:.4f}, which is outside [0,1]. Falling back to baseline method."
-            )
+        #if 0.0 <= candidate_w <= 1.0:
+        t_prime = (image_isovalue + 1.0) / 2.0
+        method3_weight = 1.0 / 2 * (1.0 - t_prime)
+        #method3_weight = candidate_w
+        region_proc = (region_gray + 1.0) / 2.0
+        image_isovalue_proc = (image_isovalue + 1.0) / 2.0
+        class_threshold = 0.5
+        print(
+            "Method 3 enabled: shifted x,t from [-1,1] to [0,1], "
+            f"classification threshold set to 0.5, and weight set to w=1/(1-t)={method3_weight:.4f}."
+        )
+        #else:
+        #    if classification_mode == "3":
+        #        raise ValueError(
+        #            "Method 3 was forced on, but computed w=1/(1-t)="
+        #            f"{candidate_w:.4f} is outside [0,1]. "
+        #            "Choose --classification-mode 1/auto or adjust isovalue/inside-bias."
+        #        )
     else:
         method3_weight = weight
         region_proc = region_gray
@@ -588,6 +581,8 @@ def qcrank_ehands_vertex_classification_image(
     acc_list = []
     all_correct_vals = []
     all_incorrect_vals = []
+    all_true_inside_vals = []
+    all_true_outside_vals = []
 
     tile_index = 0
     for ty in range(n_ty):
@@ -641,6 +636,19 @@ def qcrank_ehands_vertex_classification_image(
             else:
                 subtraction_vals = method3_weight * data_vals - (1.0 - method3_weight) * vc.isovalue
 
+            y_t = np.asarray(comp["y_true"]).reshape(-1)
+            y_p = np.asarray(comp["y_pred"]).reshape(-1)
+            sub = np.asarray(subtraction_vals).reshape(-1)
+            correct_mask = y_t == y_p
+            incorrect_mask = ~correct_mask
+            true_inside_mask = y_t == 0
+            true_outside_mask = y_t == 1
+
+            if np.any(true_inside_mask):
+                all_true_inside_vals.append(sub[true_inside_mask])
+            if np.any(true_outside_mask):
+                all_true_outside_vals.append(sub[true_outside_mask])
+
             print_tile_table = n_tiles == 1 and vc.di.n_data <= 64
             if print_tile_table:
                 correct_vals, incorrect_vals = print_per_datapoint_classification_table(
@@ -654,11 +662,6 @@ def qcrank_ehands_vertex_classification_image(
                 if incorrect_vals is not None:
                     all_incorrect_vals.append(incorrect_vals)
             else:
-                y_t = np.asarray(comp["y_true"]).reshape(-1)
-                y_p = np.asarray(comp["y_pred"]).reshape(-1)
-                sub = np.asarray(subtraction_vals).reshape(-1)
-                correct_mask = y_t == y_p
-                incorrect_mask = ~correct_mask
                 if np.any(correct_mask):
                     all_correct_vals.append(sub[correct_mask])
                 if np.any(incorrect_mask):
@@ -694,11 +697,17 @@ def qcrank_ehands_vertex_classification_image(
     print(f"Saving side-by-side figure to: {side_by_side_out}")
 
     plot_classification_summary_figure(
+        region_width=rw,
+        region_height=rh,
+        tile_width=tile_width,
+        tile_height=tile_height,
         acc_list=acc_list,
         cm_list=cm_list,
         agg_counts=agg_counts,
         all_correct_vals=all_correct_vals,
         all_incorrect_vals=all_incorrect_vals,
+        all_true_inside_vals=all_true_inside_vals,
+        all_true_outside_vals=all_true_outside_vals,
         out_name=summary_out,
         bins=20,
     )
@@ -736,7 +745,7 @@ def plot_full_image_vs_classification(
     h, w = input_image.shape
     fig_w = min(22.0, max(10.0, w / 32.0 + 4.0))
     fig_h = min(14.0, max(5.0, h / 32.0 + 2.0))
-    fig, axes = plt.subplots(1, 2, figsize=(2.0 * fig_w, fig_h))
+    fig, axes = plt.subplots(1, 2, figsize=(1.65 * fig_w, fig_h))
 
     ax_input, ax_pred = axes
     in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
@@ -756,17 +765,21 @@ def plot_full_image_vs_classification(
                 ov = np.zeros((h, w, 4), dtype=np.float32)
                 ov[pad_mask] = (0.95, 0.15, 0.65, 0.55)
                 ax.imshow(ov, origin="upper", interpolation="nearest", zorder=2)
-            ax_input.set_title("Input (magenta = padded band, -1)")
+            ax_input.set_title("Input Image Grayscale (magenta = padded band, -1)")
         else:
             ax_input.set_title(
-                "Input (no padded band — region is a multiple of tile size)"
+                "Input Image Grayscale"
             )
     else:
-        ax_input.set_title("Input (full region, normalized grayscale)")
+        ax_input.set_title("Input Image Grayscale (full region)")
     ax_input.set_xlabel("x (column)")
     ax_input.set_ylabel("y (row)")
     cbar0 = fig.colorbar(
-        im0, ax=ax_input, ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax], fraction=0.046, pad=0.04
+        im0,
+        ax=ax_input,
+        ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax],
+        fraction=0.042,
+        pad=0.02,
     )
     cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
 
@@ -775,20 +788,20 @@ def plot_full_image_vs_classification(
     )
     if region_size_hw is not None:
         if n_pad > 0:
-            ax_pred.set_title("Predicted (magenta = same padded band)")
+            ax_pred.set_title("Predicted (magenta = padded band) (stitched tiles)")
         else:
             ax_pred.set_title(
-                "Predicted (no padded band — canvas matches region)"
+                "Predicted Classes (stitched tiles)"
             )
     else:
-        ax_pred.set_title("Predicted classification (stitched tiles)")
+        ax_pred.set_title("Predicted Classes (stitched tiles)")
     ax_pred.set_xlabel("x (column)")
     ax_pred.set_ylabel("y (row)")
     cmap = plt.get_cmap("viridis_r")
     ax_pred.legend(
         handles=[
-            Patch(facecolor=cmap(0.0), edgecolor="black", label="0 = inside"),
-            Patch(facecolor=cmap(1.0), edgecolor="black", label="1 = outside"),
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
         ],
         loc="upper right",
         framealpha=0.95,
@@ -813,21 +826,16 @@ def plot_full_image_vs_classification(
         rh_s, rw_s = int(region_size_hw[0]), int(region_size_hw[1])
         th_s, tw_s = int(tile_size_hw[0]), int(tile_size_hw[1])
         cap = (
-            f"Canvas {w}×{h} px, region {rw_s}×{rh_s} px, tile {th_s}×{tw_s} px. "
-            f"Padded pixels (beyond region): {n_pad}. "
+            f"Region {rw_s}×{rh_s} px, tile size {th_s}×{tw_s} px. "
+            f"Padded pixels: {n_pad}. "
             f"Number of tiles: {n_tiles}. "
             f"Isovalue: {isovalue:.3f}"
         )
-        if n_pad == 0:
-            cap += (
-                " No extra band — width and height are multiples of the tile size, "
-                "so the tile grid fills the region exactly."
-            )
 
     if has_canvas_caption:
-        fig.tight_layout(rect=[0, 0, 1, 0.90])
+        fig.tight_layout(rect=[0, 0, 1, 0.90], w_pad=0.3)
     else:
-        fig.tight_layout()
+        fig.tight_layout(w_pad=0.3)
 
     if has_canvas_caption:
         fig.canvas.draw()
@@ -865,36 +873,53 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
     if concat_incorrect.size:
         ax.hist(concat_incorrect, bins=bin_edges, alpha=0.6, label="Incorrect", color="tab:orange")
 
-    ax.set_xlabel("Input value after weighted subtraction")
-    ax.set_ylabel("Count over all runs")
-    ax.set_title("Input value distribution: correct vs incorrect classifications")
+    ax.set_xlabel("Input data value after weighted subtraction")
+    ax.set_ylabel("Number of Samples")
+    ax.set_title("Input data value distribution: correct vs incorrect classifications")
     ax.legend()
 
 
-def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None, cmap="Blues"):
+def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
+    """Diagonal = correct (Blues, scaled within diagonal); off-diagonal = error (Oranges, scaled within errors)."""
     if ax is None:
         ax = plt.gca()
 
-    im = ax.imshow(total_cm, interpolation="nearest", cmap=cmap)
-    ax.set_title(title)
+    total_cm = np.asarray(total_cm, dtype=float)
+    cmap_blue = plt.colormaps["Blues"]
+    cmap_orange = plt.colormaps["Oranges"]
 
-    ax.figure.colorbar(im, ax=ax)
+    diag_max = max(total_cm[0, 0], total_cm[1, 1])
+    if diag_max <= 0:
+        diag_max = 1.0
+    rgba = np.zeros((2, 2, 4), dtype=np.float64)
+    for i in range(2):
+        for j in range(2):
+            val = total_cm[i, j]
+            if i == j:
+                t = val / diag_max
+                rgba[i, j] = cmap_blue(0.22 + 0.73 * t)
+            else:
+                t = val / diag_max
+                rgba[i, j] = cmap_orange(0.28 + 0.67 * t)
+
+    ax.imshow(rgba, interpolation="nearest")
+    ax.set_title(
+        f"{title}\n(diagonal: correct, blue | off-diagonal: error, orange)",
+        fontsize=10,
+    )
 
     tick_marks = np.arange(2)
     ax.set_xticks(tick_marks)
-    ax.set_xticklabels(["Pred 0", "Pred 1"])
+    ax.set_xticklabels(["Pred Inside", "Pred Outside"])
     ax.set_yticks(tick_marks)
-    ax.set_yticklabels(["True 0", "True 1"])
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
+    ax.set_yticklabels(["True Inside", "True Outside"])
+    ax.set_xlabel("Predicted Class")
+    ax.set_ylabel("True Class")
 
-    norm = im.norm
-    cm = im.get_cmap()
     for i in range(2):
         for j in range(2):
             val = int(total_cm[i, j])
-            rgba = cm(norm(val))
-            r, g, b = rgba[0], rgba[1], rgba[2]
+            r, g, b, _ = rgba[i, j]
             luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
             ax.text(
                 j,
@@ -914,8 +939,35 @@ def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
     values = [agg_counts["0"], agg_counts["1"]]
     ax.bar(labels, values, color=["tab:blue", "tab:orange"])
     ax.set_xlabel("Predicted class (final bit)")
-    ax.set_ylabel("Total count over all runs")
+    ax.set_ylabel("Number of Samples")
     ax.set_title("Aggregated Predicted Class Counts")
+
+
+def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals, bins=20, ax=None):
+    if ax is None:
+        ax = plt.gca()
+
+    if not (all_true_inside_vals or all_true_outside_vals):
+        ax.set_title("True input data distribution")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        return
+
+    concat_true_inside = np.concatenate(all_true_inside_vals) if all_true_inside_vals else np.array([])
+    concat_true_outside = np.concatenate(all_true_outside_vals) if all_true_outside_vals else np.array([])
+    all_true_vals = np.concatenate([a for a in (concat_true_inside, concat_true_outside) if a.size])
+    bin_edges = np.histogram_bin_edges(all_true_vals, bins=bins)
+
+    ax.hist(
+        all_true_vals,
+        bins=bin_edges,
+        alpha=0.75,
+        color="tab:blue",
+    )
+
+    ax.set_xlabel("Input data value after weighted subtraction")
+    ax.set_ylabel("Number of Samples")
+    ax.set_title("Input data value distribution (all true classes)")
 
 
 def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
@@ -959,22 +1011,29 @@ def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true
     return correct_vals, incorrect_vals
 
 
-def plot_classification_summary_figure(acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, out_name, bins=20):
+def plot_classification_summary_figure(region_width, region_height, tile_width, tile_height, acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, all_true_inside_vals, all_true_outside_vals, out_name, bins=20):
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
-    print(f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}")
+    title = f"Mean accuracy over {region_width}x{region_height} region, with {len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
+    print(title)
 
     fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(
-        f"Mean accuracy over {len(acc_list)} runs (0 if >=0 else 1): {mean_acc:.3f}",
+        title,
         fontsize=16,
     )
-    ax_hist, ax_cm, ax_bar = ax_arr
+    ax_hist, ax_true_hist, ax_cm = ax_arr
 
     plot_correct_incorrect_input_histogram(
         all_correct_vals,
         all_incorrect_vals,
         bins=bins,
         ax=ax_hist,
+    )
+    plot_true_class_input_histogram(
+        all_true_inside_vals,
+        all_true_outside_vals,
+        bins=bins,
+        ax=ax_true_hist,
     )
 
     if cm_list:
@@ -990,7 +1049,7 @@ def plot_classification_summary_figure(acc_list, cm_list, agg_counts, all_correc
         ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
         ax_cm.axis("off")
 
-    plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
+    #plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
 
     fig.tight_layout()
     fig.savefig(out_name, dpi=300)
