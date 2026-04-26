@@ -570,6 +570,7 @@ def qcrank_ehands_vertex_classification_image(
     canvas_h = n_ty * tile_height
     canvas_w = n_tx * tile_width
     padded_canvas_gray = np.full((canvas_h, canvas_w), -1.0, dtype=np.float32)
+    padded_canvas_true = np.zeros((canvas_h, canvas_w), dtype=np.int32)
     padded_canvas_pred = np.zeros((canvas_h, canvas_w), dtype=np.int32)
 
     nq_data = 1
@@ -671,6 +672,9 @@ def qcrank_ehands_vertex_classification_image(
             agg_counts["1"] += int(np.sum(classifications == 1))
 
             n_pix = tile_width * tile_height
+            true_tile = (
+                np.asarray(comp["y_true"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+            )
             pred_tile = (
                 np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
             )
@@ -679,6 +683,7 @@ def qcrank_ehands_vertex_classification_image(
             ty1 = ty0 + tile_height
             tx1 = tx0 + tile_width
             padded_canvas_gray[ty0:ty1, tx0:tx1] = padded_tile
+            padded_canvas_true[ty0:ty1, tx0:tx1] = true_tile
             padded_canvas_pred[ty0:ty1, tx0:tx1] = pred_tile
 
             tile_index += 1
@@ -713,6 +718,7 @@ def qcrank_ehands_vertex_classification_image(
     )
     plot_full_image_vs_classification(
         padded_canvas_gray,
+        padded_canvas_true,
         padded_canvas_pred,
         out_name=side_by_side_out,
         input_value_range=(0.0, 1.0) if use_method3 else (-1.0, 1.0),
@@ -731,6 +737,7 @@ def qcrank_ehands_vertex_classification_image(
 
 def plot_full_image_vs_classification(
     input_image,
+    true_image,
     predicted_image,
     out_name,
     *,
@@ -741,13 +748,14 @@ def plot_full_image_vs_classification(
     n_tiles=None,
 ):
     input_image = np.asarray(input_image, dtype=np.float32)
+    true_image = np.asarray(true_image, dtype=np.int32)
     predicted_image = np.asarray(predicted_image, dtype=np.int32)
     h, w = input_image.shape
     fig_w = min(22.0, max(10.0, w / 32.0 + 4.0))
     fig_h = min(14.0, max(5.0, h / 32.0 + 2.0))
-    fig, axes = plt.subplots(1, 2, figsize=(1.65 * fig_w, fig_h))
+    fig, axes = plt.subplots(1, 3, figsize=(1.65 * fig_w, fig_h))
 
-    ax_input, ax_pred = axes
+    ax_input, ax_true, ax_pred = axes
     in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
     im0 = ax_input.imshow(
         input_image, cmap="gray", vmin=in_vmin, vmax=in_vmax, origin="upper", zorder=1
@@ -761,7 +769,7 @@ def plot_full_image_vs_classification(
         pad_mask = (cy >= rh_i) | (cx >= rw_i)
         n_pad = int(np.sum(pad_mask))
         if n_pad > 0:
-            for ax in (ax_input, ax_pred):
+            for ax in (ax_input, ax_true, ax_pred):
                 ov = np.zeros((h, w, 4), dtype=np.float32)
                 ov[pad_mask] = (0.95, 0.15, 0.65, 0.55)
                 ax.imshow(ov, origin="upper", interpolation="nearest", zorder=2)
@@ -774,14 +782,36 @@ def plot_full_image_vs_classification(
         ax_input.set_title("Input Image Grayscale (full region)")
     ax_input.set_xlabel("x (column)")
     ax_input.set_ylabel("y (row)")
+    # Keep subplot widths symmetric by attaching the colorbar inside the first panel.
+    cax0 = ax_input.inset_axes([1.02, 0.08, 0.025, 0.84])
     cbar0 = fig.colorbar(
         im0,
-        ax=ax_input,
+        cax=cax0,
         ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax],
-        fraction=0.042,
-        pad=0.02,
     )
     cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
+
+    ax_true.imshow(
+        true_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
+    )
+    if region_size_hw is not None:
+        if n_pad > 0:
+            ax_true.set_title("Classical (magenta = padded band) (stitched tiles)")
+        else:
+            ax_true.set_title("Classical Classes (stitched tiles)")
+    else:
+        ax_true.set_title("Classical Classes (stitched tiles)")
+    ax_true.set_xlabel("x (column)")
+    ax_true.set_ylabel("y (row)")
+    cmap = plt.get_cmap("viridis_r")
+    ax_true.legend(
+        handles=[
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
+        ],
+        loc="upper right",
+        framealpha=0.95,
+    )
 
     im1 = ax_pred.imshow(
         predicted_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
@@ -797,7 +827,6 @@ def plot_full_image_vs_classification(
         ax_pred.set_title("Predicted Classes (stitched tiles)")
     ax_pred.set_xlabel("x (column)")
     ax_pred.set_ylabel("y (row)")
-    cmap = plt.get_cmap("viridis_r")
     ax_pred.legend(
         handles=[
             Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
@@ -807,15 +836,9 @@ def plot_full_image_vs_classification(
         framealpha=0.95,
     )
 
-    def _axis_ticks(n, max_ticks=17):
-        if n <= max_ticks:
-            return np.arange(n)
-        step = max(1, int(np.ceil(n / max_ticks)))
-        return np.arange(0, n, step)
-
-    xt = _axis_ticks(w)
-    yt = _axis_ticks(h)
-    for ax in (ax_input, ax_pred):
+    xt = axis_ticks(w)
+    yt = axis_ticks(h)
+    for ax in (ax_input, ax_true, ax_pred):
         ax.set_xticks(xt)
         ax.set_yticks(yt)
 
@@ -833,9 +856,9 @@ def plot_full_image_vs_classification(
         )
 
     if has_canvas_caption:
-        fig.tight_layout(rect=[0, 0, 1, 0.90], w_pad=0.3)
+        fig.tight_layout(rect=[0, 0, 1, 0.90])
     else:
-        fig.tight_layout(w_pad=0.3)
+        fig.tight_layout()
 
     if has_canvas_caption:
         fig.canvas.draw()
@@ -847,13 +870,18 @@ def plot_full_image_vs_classification(
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
     print(f"Saved full image vs classification plot to: {out_name}")
 
+def axis_ticks(n, max_ticks=17):
+    if n <= max_ticks:
+        return np.arange(n)
+    step = max(1, int(np.ceil(n / max_ticks)))
+    return np.arange(0, n, step)
 
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
     if ax is None:
         ax = plt.gca()
 
     if not (all_correct_vals or all_incorrect_vals):
-        ax.set_title("Input distribution: correct vs incorrect classifications")
+        ax.set_title("Quantum Classification: correct vs incorrect classifications")
         ax.text(0.5, 0.5, "No data", ha="center", va="center")
         ax.axis("off")
         return
@@ -875,7 +903,7 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
 
     ax.set_xlabel("Input data value after weighted subtraction")
     ax.set_ylabel("Number of Samples")
-    ax.set_title("Input data value distribution: correct vs incorrect classifications")
+    ax.set_title("Quantum Classification: correct vs incorrect classifications")
     ax.legend()
 
 
@@ -967,7 +995,7 @@ def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals,
 
     ax.set_xlabel("Input data value after weighted subtraction")
     ax.set_ylabel("Number of Samples")
-    ax.set_title("Input data value distribution (all true classes)")
+    ax.set_title("Classical Classification")
 
 
 def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
@@ -1021,14 +1049,9 @@ def plot_classification_summary_figure(region_width, region_height, tile_width, 
         title,
         fontsize=16,
     )
-    ax_hist, ax_true_hist, ax_cm = ax_arr
+    ax_true_hist, ax_hist, ax_cm = ax_arr
 
-    plot_correct_incorrect_input_histogram(
-        all_correct_vals,
-        all_incorrect_vals,
-        bins=bins,
-        ax=ax_hist,
-    )
+    # Classical Classification
     plot_true_class_input_histogram(
         all_true_inside_vals,
         all_true_outside_vals,
@@ -1036,6 +1059,15 @@ def plot_classification_summary_figure(region_width, region_height, tile_width, 
         ax=ax_true_hist,
     )
 
+    # Quantum Classification
+    plot_correct_incorrect_input_histogram(
+        all_correct_vals,
+        all_incorrect_vals,
+        bins=bins,
+        ax=ax_hist,
+    )
+
+    # Confusion Matrix
     if cm_list:
         total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
         print(
