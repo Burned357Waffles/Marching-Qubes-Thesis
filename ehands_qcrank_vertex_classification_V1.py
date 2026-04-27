@@ -430,22 +430,34 @@ def classification_output_paths(
     image_x_offset: int,
     image_y_offset: int,
     save_name: str,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """
     Paths under classification_summaries/ and side-by-sides/ with a unique name
     derived from the source image file, crop offset, region size, and tile size.
     """
     summary_dir = "classification_summaries"
     side_dir = "side-by-sides"
+    residual_dir = "residual_plots"
+    os.makedirs(summary_dir, exist_ok=True)
+    os.makedirs(side_dir, exist_ok=True)
+    os.makedirs(residual_dir, exist_ok=True)
     if save_name is not None:
-        return summary_dir + "/" + save_name + "_classification_summary.png", side_dir + "/" + save_name + "_image_vs_classification_side_by_side.png"
+        return (
+            summary_dir + "/" + save_name + "_classification_summary.png",
+            side_dir + "/" + save_name + "_image_vs_classification_side_by_side.png",
+            residual_dir + "/" + save_name + "_classical_minus_isovalue_vs_quantum_ev.png",
+        )
     else:
         stem = _safe_image_stem(image_path)
         tag = (
             f"{stem}_off{image_x_offset}x{image_y_offset}_{rw}x{rh}_"
             f"tile{tile_width}x{tile_height}"
         )
-        return summary_dir + "/" + f"classification_summary_{tag}.png", side_dir + "/" + f"image_vs_classification_side_by_side_{tag}.png"
+        return (
+            summary_dir + "/" + f"classification_summary_{tag}.png",
+            side_dir + "/" + f"image_vs_classification_side_by_side_{tag}.png",
+            residual_dir + "/" + f"classical_minus_isovalue_vs_quantum_ev_{tag}.png",
+        )
 
 
 # -------------------------------- Test --------------------------------
@@ -584,6 +596,8 @@ def qcrank_ehands_vertex_classification_image(
     all_incorrect_vals = []
     all_true_inside_vals = []
     all_true_outside_vals = []
+    all_classical_minus_iso_vals = []
+    all_quantum_ev_vals = []
 
     tile_index = 0
     for ty in range(n_ty):
@@ -632,10 +646,14 @@ def qcrank_ehands_vertex_classification_image(
             acc_list.append(comp["accuracy"])
 
             data_vals = vc.di.data_inp[:, 0, 0]
+            quantum_ev_vals = np.asarray(all_rec_list[0][-1])[:, 0, 0]
             if use_method3:
                 subtraction_vals = data_vals - vc.isovalue
             else:
                 subtraction_vals = method3_weight * data_vals - (1.0 - method3_weight) * vc.isovalue
+
+            all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
+            all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
 
             y_t = np.asarray(comp["y_true"]).reshape(-1)
             y_p = np.asarray(comp["y_pred"]).reshape(-1)
@@ -688,7 +706,7 @@ def qcrank_ehands_vertex_classification_image(
 
             tile_index += 1
 
-    summary_out, side_by_side_out = classification_output_paths(
+    summary_out, side_by_side_out, residual_out = classification_output_paths(
         image_path,
         rw,
         rh,
@@ -700,6 +718,7 @@ def qcrank_ehands_vertex_classification_image(
     )
     print(f"Saving classification summary to: {summary_out}")
     print(f"Saving side-by-side figure to: {side_by_side_out}")
+    print(f"Saving residual plot to: {residual_out}")
 
     plot_classification_summary_figure(
         region_width=rw,
@@ -726,6 +745,11 @@ def qcrank_ehands_vertex_classification_image(
         tile_size_hw=(tile_height, tile_width),
         isovalue=image_isovalue_proc,
         n_tiles=n_tiles,
+    )
+    plot_classical_minus_isovalue_vs_quantum_ev(
+        all_classical_minus_iso_vals=all_classical_minus_iso_vals,
+        all_quantum_ev_vals=all_quantum_ev_vals,
+        out_name=residual_out,
     )
 
     print("Returning data and recovered data lists (last tile only)")
@@ -1088,6 +1112,90 @@ def plot_classification_summary_figure(region_width, region_height, tile_width, 
     print(f"Saved plots to: {out_name}")
     plt.close(fig)
     return mean_acc
+
+
+def plot_classical_minus_isovalue_vs_quantum_ev(
+    all_classical_minus_iso_vals,
+    all_quantum_ev_vals,
+    out_name,
+):
+    """
+    Plot style mirrors notebook residual plotting:
+      x-axis: classical weighted subtraction
+              w*x - (1-w)*isovalue (or x-isovalue in Method 3)
+      y-axis: quantum recovered expectation value (ev)
+    """
+    if not all_classical_minus_iso_vals or not all_quantum_ev_vals:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
+        ax.set_title("Classical weighted subtraction vs Quantum ev")
+        ax.text(0.5, 0.5, "No tile accuracy data", ha="center", va="center")
+        ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(out_name, dpi=300)
+        print(f"Saved residual plot to: {out_name}")
+        plt.close(fig)
+        return
+
+    classical_vals = np.concatenate(all_classical_minus_iso_vals).astype(float).reshape(-1)
+    quantum_ev_vals = np.concatenate(all_quantum_ev_vals).astype(float).reshape(-1)
+
+    min_val = float(min(np.min(quantum_ev_vals), np.min(classical_vals)))
+    max_val = float(max(np.max(quantum_ev_vals), np.max(classical_vals)))
+    if np.isclose(min_val, max_val):
+        min_val = min_val - 0.05
+        max_val = max_val + 0.05
+
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5))
+    ax.scatter(
+        classical_vals,
+        quantum_ev_vals,
+        color="tab:blue",
+        alpha=0.85,
+        label="Data points",
+    )
+    ax.plot(
+        [min_val, max_val],
+        [min_val, max_val],
+        color="gray",
+        linestyle="--",
+        linewidth=1.2,
+        label="Ideal (y = x)",
+    )
+
+    if quantum_ev_vals.size >= 2 and float(np.std(classical_vals)) > 1e-12:
+        coefficients = np.polyfit(classical_vals, quantum_ev_vals, 1)
+        fit_y = np.poly1d(coefficients)(classical_vals)
+        ax.plot(classical_vals, fit_y, color="red", label="Line of Best Fit")
+        print(f"Slope of line of best fit: {coefficients[0]:.4f}")
+    else:
+        mean_q = float(np.mean(quantum_ev_vals))
+        ax.axhline(
+            mean_q,
+            color="red",
+            linewidth=1.3,
+            label=f"Mean quantum EV ({mean_q:.4f})",
+        )
+        print("Line of best fit skipped (classical values are constant).")
+
+    ax.set_xlabel("Classical weighted subtraction value")
+    ax.set_ylabel("Quantum EV")
+    #ax.set_title("Classical weighted subtraction vs Quantum EV")
+    ax.set_xlim(min_val, max_val)
+    ax.set_ylim(min_val, max_val)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_name, dpi=300)
+    print(
+        "Difference stats "
+        f"(quantum_ev - weighted_subtraction): "
+        f"mean={(quantum_ev_vals - classical_vals).mean():.4f}, "
+        f"min={(quantum_ev_vals - classical_vals).min():.4f}, "
+        f"max={(quantum_ev_vals - classical_vals).max():.4f}"
+    )
+    print(f"Saved residual plot to: {out_name}")
+    plt.close(fig)
 
 
 # -------------------------------- Main --------------------------------
