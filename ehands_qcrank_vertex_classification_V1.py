@@ -889,7 +889,7 @@ def plot_full_image_vs_classification(
         p_in = ax_input.get_position()
         p_pr = ax_pred.get_position()
         x_mid = (p_in.x0 + p_pr.x1) / 2.0
-        fig.suptitle(cap, fontsize=9, ha="center", x=x_mid, y=0.96)
+        fig.suptitle(cap, fontsize=24, ha="center", x=x_mid, y=0.96)
 
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
     print(f"Saved full image vs classification plot to: {out_name}")
@@ -1071,7 +1071,7 @@ def plot_classification_summary_figure(region_width, region_height, tile_width, 
     fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(
         title,
-        fontsize=16,
+        fontsize=24,
     )
     ax_true_hist, ax_hist, ax_cm = ax_arr
 
