@@ -771,6 +771,7 @@ def plot_full_image_vs_classification(
     tile_size_hw=None,
     n_tiles=None,
 ):
+    font_size_delta = 5
     input_image = np.asarray(input_image, dtype=np.float32)
     true_image = np.asarray(true_image, dtype=np.int32)
     predicted_image = np.asarray(predicted_image, dtype=np.int32)
@@ -804,8 +805,8 @@ def plot_full_image_vs_classification(
             )
     else:
         ax_input.set_title("Input Image Grayscale (full region)")
-    ax_input.set_xlabel("x (column)")
-    ax_input.set_ylabel("y (row)")
+    ax_input.set_xlabel("x")
+    ax_input.set_ylabel("y")
     # Keep subplot widths symmetric by attaching the colorbar inside the first panel.
     cax0 = ax_input.inset_axes([1.02, 0.08, 0.025, 0.84])
     cbar0 = fig.colorbar(
@@ -814,19 +815,21 @@ def plot_full_image_vs_classification(
         ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax],
     )
     cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
+    for tick in cbar0.ax.get_yticklabels():
+        tick.set_fontsize(tick.get_fontsize() + font_size_delta)
 
     ax_true.imshow(
         true_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
     )
     if region_size_hw is not None:
         if n_pad > 0:
-            ax_true.set_title("Classical (magenta = padded band) (stitched tiles)")
+            ax_true.set_title("Classical Classifications (magenta = padded band)")
         else:
-            ax_true.set_title("Classical Classes (stitched tiles)")
+            ax_true.set_title("Classical Classifications")
     else:
-        ax_true.set_title("Classical Classes (stitched tiles)")
-    ax_true.set_xlabel("x (column)")
-    ax_true.set_ylabel("y (row)")
+        ax_true.set_title("Classical Classifications")
+    ax_true.set_xlabel("x")
+    ax_true.set_ylabel("y")
     cmap = plt.get_cmap("viridis_r")
     ax_true.legend(
         handles=[
@@ -842,15 +845,13 @@ def plot_full_image_vs_classification(
     )
     if region_size_hw is not None:
         if n_pad > 0:
-            ax_pred.set_title("Predicted (magenta = padded band) (stitched tiles)")
+            ax_pred.set_title("Quantum Classifications (magenta = padded band)")
         else:
-            ax_pred.set_title(
-                "Predicted Classes (stitched tiles)"
-            )
+            ax_pred.set_title("Quantum Classifications")
     else:
-        ax_pred.set_title("Predicted Classes (stitched tiles)")
-    ax_pred.set_xlabel("x (column)")
-    ax_pred.set_ylabel("y (row)")
+        ax_pred.set_title("Quantum Classifications")
+    ax_pred.set_xlabel("x")
+    ax_pred.set_ylabel("y")
     ax_pred.legend(
         handles=[
             Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
@@ -865,40 +866,39 @@ def plot_full_image_vs_classification(
     for ax in (ax_input, ax_true, ax_pred):
         ax.set_xticks(xt)
         ax.set_yticks(yt)
+        increase_axis_text_size(ax, delta_points=font_size_delta)
 
-    has_canvas_caption = (
-        region_size_hw is not None and tile_size_hw is not None
-    )
-    if has_canvas_caption:
-        rh_s, rw_s = int(region_size_hw[0]), int(region_size_hw[1])
-        th_s, tw_s = int(tile_size_hw[0]), int(tile_size_hw[1])
-        cap = (
-            f"Region {rw_s}×{rh_s} px, tile size {th_s}×{tw_s} px. "
-            f"Padded pixels: {n_pad}. "
-            f"Number of tiles: {n_tiles}. "
-            f"Isovalue: {isovalue:.3f}"
-        )
-
-    if has_canvas_caption:
-        fig.tight_layout(rect=[0, 0, 1, 0.90])
-    else:
-        fig.tight_layout()
-
-    if has_canvas_caption:
-        fig.canvas.draw()
-        p_in = ax_input.get_position()
-        p_pr = ax_pred.get_position()
-        x_mid = (p_in.x0 + p_pr.x1) / 2.0
-        fig.suptitle(cap, fontsize=24, ha="center", x=x_mid, y=0.96)
+    fig.tight_layout()
 
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
     print(f"Saved full image vs classification plot to: {out_name}")
 
-def axis_ticks(n, max_ticks=17):
-    if n <= max_ticks:
-        return np.arange(n)
-    step = max(1, int(np.ceil(n / max_ticks)))
-    return np.arange(0, n, step)
+def axis_ticks(n, step=10):
+    """Pixel-axis tick positions; labels only at multiples of `step` (no extra edge tick)."""
+    if n <= 0:
+        return np.array([], dtype=int)
+    return np.asarray(list(range(0, n, step)), dtype=int)
+
+
+def increase_axis_text_size(ax, delta_points=5):
+    """Increase axis/legend/tick/text sizes by a fixed point delta."""
+    ax.title.set_fontsize(ax.title.get_fontsize() + delta_points)
+    ax.xaxis.label.set_fontsize(ax.xaxis.label.get_fontsize() + delta_points)
+    ax.yaxis.label.set_fontsize(ax.yaxis.label.get_fontsize() + delta_points)
+
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontsize(tick.get_fontsize() + delta_points)
+
+    legend = ax.get_legend()
+    if legend is not None:
+        for text in legend.get_texts():
+            text.set_fontsize(text.get_fontsize() + delta_points)
+        legend_title = legend.get_title()
+        if legend_title is not None:
+            legend_title.set_fontsize(legend_title.get_fontsize() + delta_points)
+
+    for text in ax.texts:
+        text.set_fontsize(text.get_fontsize() + delta_points)
 
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
     if ax is None:
@@ -955,10 +955,7 @@ def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matri
                 rgba[i, j] = cmap_orange(0.28 + 0.67 * t)
 
     ax.imshow(rgba, interpolation="nearest")
-    ax.set_title(
-        f"{title}\n(diagonal: correct, blue | off-diagonal: error, orange)",
-        fontsize=10,
-    )
+    ax.set_title(title, fontsize=10)
 
     tick_marks = np.arange(2)
     ax.set_xticks(tick_marks)
@@ -1064,15 +1061,12 @@ def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true
 
 
 def plot_classification_summary_figure(region_width, region_height, tile_width, tile_height, acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, all_true_inside_vals, all_true_outside_vals, out_name, bins=20):
+    font_size_delta = 5
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
     title = f"Mean accuracy over {region_width}x{region_height} region, with {len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
     print(title)
 
     fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(
-        title,
-        fontsize=24,
-    )
     ax_true_hist, ax_hist, ax_cm = ax_arr
 
     # Classical Classification
@@ -1106,6 +1100,8 @@ def plot_classification_summary_figure(region_width, region_height, tile_width, 
         ax_cm.axis("off")
 
     #plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
+    for ax in ax_arr:
+        increase_axis_text_size(ax, delta_points=font_size_delta)
 
     fig.tight_layout()
     fig.savefig(out_name, dpi=300)
