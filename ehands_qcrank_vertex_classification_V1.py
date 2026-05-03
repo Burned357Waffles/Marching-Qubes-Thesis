@@ -707,6 +707,8 @@ def build_classification_plot_context(
 
 
 # -------------------------------- Test --------------------------------
+
+
 def qcrank_ehands_vertex_classification_image_driver(
     isovalue,
     weight,
@@ -722,116 +724,190 @@ def qcrank_ehands_vertex_classification_image_driver(
     classification_mode="auto",
     inside_bias=0,
     save_name=None,
+    *,
+    tile_sizes=(2, 4, 8, 16, 64),
+    iterations=5,
 ):
+    """
+    For each square edge length in ``tile_sizes``, runs the full pipeline ``iterations``
+    times (same as the original single-size driver). Output filenames use
+    ``{base}_{tile_width}x{tile_height}`` as the save-name stem.
 
+    The ``tile_width`` / ``tile_height`` parameters are unused (kept for API compatibility);
+    the sweep uses ``tile_sizes`` instead.
+    """
     # Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
     print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
+    print(f"Tile sizes: {tile_sizes}, {iterations} iterations per size.")
 
-    ############## PREPROCESS SECTION ##############
-    preprocess_start_time = time.time()
-    pre = prepare_qcrank_ehands_vertex_classification_image(
-        isovalue=isovalue,
-        weight=weight,
-        image_path=image_path,
-        tile_width=tile_width,
-        tile_height=tile_height,
-        image_x_offset=image_x_offset,
-        image_y_offset=image_y_offset,
-        region_width=region_width,
-        region_height=region_height,
-        isovalue_mode=isovalue_mode,
-        classification_mode=classification_mode,
-        inside_bias=inside_bias,
-    )
-    preprocess_end_time = time.time()
-    preprocess_time = preprocess_end_time - preprocess_start_time
+    base_save = save_name if save_name is not None else _safe_image_stem(image_path)
+    last_tile_size_mean_accuracy = 0.0
+    results_report_lines = [
+        "Tiled classification sweep - per tile size averages",
+        f"image_path: {image_path}",
+        f"tile_sizes: {tile_sizes}",
+        f"iterations per size: {iterations}",
+        "",
+    ]
 
-    ############## CLASSIFICATION SECTION ##############
-    classification_start_time = time.time()
-    all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
-        pre,
-        weight,
-        sim,
-        tile_width=tile_width,
-        tile_height=tile_height,
-    )
+    for tile_sz in tile_sizes:
+        tw = th = int(tile_sz)
+        run_save_name = f"{base_save}_{tw}x{th}"
+        print(f"\n{'=' * 60}\nTile size {tw}x{th}  (save stem: {run_save_name})\n{'=' * 60}")
 
-    classification_end_time = time.time()
-    classification_time = classification_end_time - classification_start_time
-    
-    ############## POSTPROCESS SECTION ##############
+        total_preprocess_time = 0.0
+        total_classification_time = 0.0
+        total_postprocess_time = 0.0
+        total_mean_accuracy = 0.0
 
-    postprocess_start_time = time.time()
-    stitch_classification_tiles_into_canvases(pre, tile_width, tile_height, stitch_records)
-    plot_ctx = build_classification_plot_context(
-        pre,
-        image_path,
-        tile_width,
-        tile_height,
-        image_x_offset,
-        image_y_offset,
-        save_name,
-    )
-    postprocess_end_time = time.time()
-    postprocess_time = postprocess_end_time - postprocess_start_time
+        for i in range(iterations):
+            print(f"\nIteration {i + 1}:")
+            ############## PREPROCESS SECTION ##############
+            preprocess_start_time = time.time()
+            pre = prepare_qcrank_ehands_vertex_classification_image(
+                isovalue=isovalue,
+                weight=weight,
+                image_path=image_path,
+                tile_width=tw,
+                tile_height=th,
+                image_x_offset=image_x_offset,
+                image_y_offset=image_y_offset,
+                region_width=region_width,
+                region_height=region_height,
+                isovalue_mode=isovalue_mode,
+                classification_mode=classification_mode,
+                inside_bias=inside_bias,
+            )
+            preprocess_end_time = time.time()
+            preprocess_time = preprocess_end_time - preprocess_start_time
 
-    ############## PLOT SECTION ##############
-    print_datapoint_classification_tables_if_any(pre)
+            ############## CLASSIFICATION SECTION ##############
+            classification_start_time = time.time()
+            all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
+                pre,
+                weight,
+                sim,
+                tile_width=tw,
+                tile_height=th,
+            )
 
-    summary_out, side_by_side_out, residual_out = classification_output_paths(
-        plot_ctx["image_path"],
-        plot_ctx["rw"],
-        plot_ctx["rh"],
-        plot_ctx["tile_width"],
-        plot_ctx["tile_height"],
-        plot_ctx["image_x_offset"],
-        plot_ctx["image_y_offset"],
-        plot_ctx["save_name"],
-    )
+            classification_end_time = time.time()
+            classification_time = classification_end_time - classification_start_time
 
-    print(f"Saving classification summary to: {summary_out}")
-    print(f"Saving side-by-side figure to: {side_by_side_out}")
-    print(f"Saving residual plot to: {residual_out}")
-    plot_classification_summary_figure(
-        region_width=plot_ctx["rw"],
-        region_height=plot_ctx["rh"],
-        tile_width=plot_ctx["tile_width"],
-        tile_height=plot_ctx["tile_height"],
-        acc_list=plot_ctx["acc_list"],
-        cm_list=plot_ctx["cm_list"],
-        agg_counts=plot_ctx["agg_counts"],
-        all_correct_vals=plot_ctx["all_correct_vals"],
-        all_incorrect_vals=plot_ctx["all_incorrect_vals"],
-        all_true_inside_vals=plot_ctx["all_true_inside_vals"],
-        all_true_outside_vals=plot_ctx["all_true_outside_vals"],
-        out_name=summary_out,
-        bins=20,
-    )
-    plot_full_image_vs_classification(
-        plot_ctx["padded_canvas_gray"],
-        plot_ctx["padded_canvas_true"],
-        plot_ctx["padded_canvas_pred"],
-        out_name=side_by_side_out,
-        input_value_range=(0.0, 1.0) if plot_ctx["use_method3"] else (-1.0, 1.0),
-        region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
-    )
-    plot_classical_minus_isovalue_vs_quantum_ev(
-        all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
-        all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
-        out_name=residual_out,
-    )
+            ############## POSTPROCESS SECTION ##############
+            postprocess_start_time = time.time()
+            stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
+            plot_ctx = build_classification_plot_context(
+                pre,
+                image_path,
+                tw,
+                th,
+                image_x_offset,
+                image_y_offset,
+                run_save_name,
+            )
+            postprocess_end_time = time.time()
+            postprocess_time = postprocess_end_time - postprocess_start_time
 
-    ############## SUMMARY ##############
+            ############## PLOT SECTION ##############
+            print_datapoint_classification_tables_if_any(pre)
 
-    total_time = preprocess_time + classification_time + postprocess_time
+            summary_out, side_by_side_out, residual_out = classification_output_paths(
+                plot_ctx["image_path"],
+                plot_ctx["rw"],
+                plot_ctx["rh"],
+                plot_ctx["tile_width"],
+                plot_ctx["tile_height"],
+                plot_ctx["image_x_offset"],
+                plot_ctx["image_y_offset"],
+                plot_ctx["save_name"],
+            )
 
-    print(f"\nPreprocess time: {preprocess_time:.2f} seconds")
-    print(f"Classification time: {classification_time:.2f} seconds")
-    print(f"Postprocess time: {postprocess_time:.2f} seconds")
-    print(f"Total time: {total_time:.2f} seconds")
+            print(f"Saving classification summary to: {summary_out}")
+            print(f"Saving side-by-side figure to: {side_by_side_out}")
+            print(f"Saving residual plot to: {residual_out}")
+            mean_accuracy = plot_classification_summary_figure(
+                region_width=plot_ctx["rw"],
+                region_height=plot_ctx["rh"],
+                tile_width=plot_ctx["tile_width"],
+                tile_height=plot_ctx["tile_height"],
+                acc_list=plot_ctx["acc_list"],
+                cm_list=plot_ctx["cm_list"],
+                agg_counts=plot_ctx["agg_counts"],
+                all_correct_vals=plot_ctx["all_correct_vals"],
+                all_incorrect_vals=plot_ctx["all_incorrect_vals"],
+                all_true_inside_vals=plot_ctx["all_true_inside_vals"],
+                all_true_outside_vals=plot_ctx["all_true_outside_vals"],
+                out_name=summary_out,
+                bins=20,
+            )
+            plot_full_image_vs_classification(
+                plot_ctx["padded_canvas_gray"],
+                plot_ctx["padded_canvas_true"],
+                plot_ctx["padded_canvas_pred"],
+                out_name=side_by_side_out,
+                input_value_range=(0.0, 1.0) if plot_ctx["use_method3"] else (-1.0, 1.0),
+                region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
+            )
+            plot_classical_minus_isovalue_vs_quantum_ev(
+                all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
+                all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
+                out_name=residual_out,
+            )
 
-    return all_rec_list, all_data_list
+            ############## SUMMARY ##############
 
+            total_time = preprocess_time + classification_time + postprocess_time
+            total_preprocess_time += preprocess_time
+            total_classification_time += classification_time
+            total_postprocess_time += postprocess_time
+            total_mean_accuracy += mean_accuracy
+
+            print(f"\nPreprocess time for iteration {i + 1}: {preprocess_time:.2f} seconds")
+            print(f"Classification time for iteration {i + 1}: {classification_time:.2f} seconds")
+            print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
+            print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
+
+        n = iterations
+        average_mean_accuracy = total_mean_accuracy / n
+        average_preprocess_time = total_preprocess_time / n
+        average_classification_time = total_classification_time / n
+        average_postprocess_time = total_postprocess_time / n
+        average_total_time = average_preprocess_time + average_classification_time + average_postprocess_time
+        overall_total_time = total_preprocess_time + total_classification_time + total_postprocess_time
+        last_tile_size_mean_accuracy = average_mean_accuracy
+
+        print(
+            f"\nAverage times and mean accuracy for tile {tw}x{th} over {n} iterations:\n"
+        )
+        print(f"Mean accuracy: {average_mean_accuracy:.3f}")
+        print(f"Average preprocess time: {average_preprocess_time:.2f} seconds")
+        print(f"Average classification time: {average_classification_time:.2f} seconds")
+        print(f"Average postprocess time: {average_postprocess_time:.2f} seconds")
+        print(f"Average total time: {average_total_time:.2f} seconds")
+        print(f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds")
+
+        results_report_lines.extend(
+            [
+                "=" * 60,
+                f"Tile size {tw}x{th}  (save stem: {run_save_name})",
+                f"Average times and mean accuracy over {n} iterations:",
+                f"Mean accuracy: {average_mean_accuracy:.3f}",
+                f"Average preprocess time: {average_preprocess_time:.2f} seconds",
+                f"Average classification time: {average_classification_time:.2f} seconds",
+                f"Average postprocess time: {average_postprocess_time:.2f} seconds",
+                f"Average total time: {average_total_time:.2f} seconds",
+                f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds",
+                "",
+            ]
+        )
+
+    results_path = f"{base_save}_results.txt"
+    with open(results_path, "w", encoding="utf-8") as rf:
+        rf.write("\n".join(results_report_lines).rstrip() + "\n")
+    print(f"\nWrote per-tile-size summary to: {results_path}")
+
+    return last_tile_size_mean_accuracy
 
 def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile_height):
     stitch_records: list[ClassificationTileStitchRecord] = []
@@ -1402,14 +1478,17 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tile-width",
         type=int,
-        default=4,
-        help="Tile width in pixels (edge tiles padded with -1.0 if needed).",
+        default=None,
+        help=(
+            "Square tile edge length (pixels). If set together with --tile-height, only that "
+            "size is run instead of the default multi-size sweep. Must equal --tile-height."
+        ),
     )
     parser.add_argument(
         "--tile-height",
         type=int,
-        default=4,
-        help="Tile height in pixels (edge tiles padded with -1.0 if needed).",
+        default=None,
+        help="Must match --tile-width when either is set (see --tile-width).",
     )
     parser.add_argument(
         "--image-x-offset",
@@ -1480,6 +1559,21 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    default_tile_sizes = (2, 4, 8, 16, 64)
+    iterations = 5
+
+    tw, th = args.tile_width, args.tile_height
+    if tw is not None or th is not None:
+        if tw is None or th is None:
+            parser.error("Use both --tile-width and --tile-height together, or omit both for the default sweep.")
+        if tw != th:
+            parser.error("Non-square tiles are not supported: --tile-width and --tile-height must be equal.")
+        if tw < 1 or th < 1:
+            parser.error("Tile width and height must be positive.")
+        tile_sizes = (tw,)
+    else:
+        tile_sizes = default_tile_sizes
+
     weight = 0.5
 
     sim = configure_aer_sim()
@@ -1489,8 +1583,8 @@ if __name__ == "__main__":
         weight,
         sim,
         image_path=args.image_path,
-        tile_width=args.tile_width,
-        tile_height=args.tile_height,
+        tile_width=tw if tw is not None else 4,
+        tile_height=th if th is not None else 4,
         image_x_offset=args.image_x_offset,
         image_y_offset=args.image_y_offset,
         region_width=args.region_width,
@@ -1499,4 +1593,6 @@ if __name__ == "__main__":
         classification_mode=args.classification_mode,
         inside_bias=args.inside_bias,
         save_name=args.save_name,
+        tile_sizes=tile_sizes,
+        iterations=iterations,
     )

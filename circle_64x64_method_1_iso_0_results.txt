@@ -1,0 +1,54 @@
+Tiled classification sweep - per tile size averages
+image_path: test_images\test_concentric_circles_64x64.png
+tile_sizes: (2, 4, 8, 16, 64)
+iterations per size: 5
+
+============================================================
+Tile size 2x2  (save stem: circle_64x64_method_1_iso_0_2x2)
+Average times and mean accuracy over 5 iterations:
+Mean accuracy: 0.996
+Average preprocess time: 0.00 seconds
+Average classification time: 44.22 seconds
+Average postprocess time: 0.00 seconds
+Average total time: 44.23 seconds
+Total time for tile 2x2: 221.15 seconds
+
+============================================================
+Tile size 4x4  (save stem: circle_64x64_method_1_iso_0_4x4)
+Average times and mean accuracy over 5 iterations:
+Mean accuracy: 0.996
+Average preprocess time: 0.00 seconds
+Average classification time: 42.35 seconds
+Average postprocess time: 0.00 seconds
+Average total time: 42.35 seconds
+Total time for tile 4x4: 211.74 seconds
+
+============================================================
+Tile size 8x8  (save stem: circle_64x64_method_1_iso_0_8x8)
+Average times and mean accuracy over 5 iterations:
+Mean accuracy: 0.997
+Average preprocess time: 0.00 seconds
+Average classification time: 39.18 seconds
+Average postprocess time: 0.00 seconds
+Average total time: 39.18 seconds
+Total time for tile 8x8: 195.92 seconds
+
+============================================================
+Tile size 16x16  (save stem: circle_64x64_method_1_iso_0_16x16)
+Average times and mean accuracy over 5 iterations:
+Mean accuracy: 0.996
+Average preprocess time: 0.00 seconds
+Average classification time: 41.21 seconds
+Average postprocess time: 0.00 seconds
+Average total time: 41.21 seconds
+Total time for tile 16x16: 206.07 seconds
+
+============================================================
+Tile size 64x64  (save stem: circle_64x64_method_1_iso_0_64x64)
+Average times and mean accuracy over 5 iterations:
+Mean accuracy: 0.996
+Average preprocess time: 0.00 seconds
+Average classification time: 41.73 seconds
+Average postprocess time: 0.00 seconds
+Average total time: 41.73 seconds
+Total time for tile 64x64: 208.66 seconds
