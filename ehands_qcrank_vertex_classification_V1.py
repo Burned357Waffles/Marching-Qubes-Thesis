@@ -5,6 +5,9 @@ from contextlib import redirect_stdout
 from typing import NamedTuple
 from PIL import Image
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from math import pi
@@ -15,9 +18,10 @@ import os
 import time
 
 import qiskit
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import SamplerV2 as Sampler
+from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
 
 print(f"Qiskit version: {qiskit.__version__}")
@@ -345,6 +349,26 @@ def configure_aer_sim():
     return sim
 
 
+def build_sim_backend(backend: str):
+    """Construct simulator backend for ``Sampler(mode=...)``: aer, fake_torino, fake_marrakesh."""
+    key = backend.lower().replace("-", "_")
+    if key == "aer":
+        return configure_aer_sim()
+    if key == "fake_torino":
+        sim = FakeTorino()
+        print(sim)
+        print(f"\nConfiguration: {sim.configuration()}")
+        return sim
+    if key == "fake_marrakesh":
+        sim = FakeMarrakesh()
+        print(sim)
+        print(f"\nConfiguration: {sim.configuration()}")
+        return sim
+    raise ValueError(
+        f"Unknown backend {backend!r}; expected 'aer', 'fake_torino', or 'fake_marrakesh'."
+    )
+
+
 def configure_qcrank_sampler(sim, n_shots):
     options = SamplerOptions()
     options.default_shots = n_shots
@@ -355,7 +379,8 @@ def configure_qcrank_sampler(sim, n_shots):
 def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
     sampler, options = configure_qcrank_sampler(sim, n_shots)
 
-    job = sampler.run(tuple(eqd.qcEL))
+    qc_run = tuple(transpile(q, sim) for q in eqd.qcEL)
+    job = sampler.run(qc_run)
     jobRes = job.result()
 
     countsL = [jobRes[0].data.c.get_counts()]
@@ -735,7 +760,7 @@ def qcrank_ehands_vertex_classification_image_driver(
     ``{base}_{tile_width}x{tile_height}`` as the save-name stem.
 
     The ``tile_width`` / ``tile_height`` parameters are unused (kept for API compatibility);
-    the sweep uses ``tile_sizes`` instead.
+    the tile test uses ``tile_sizes`` instead.
     """
     # Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
     print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
@@ -743,7 +768,7 @@ def qcrank_ehands_vertex_classification_image_driver(
 
     base_save = save_name if save_name is not None else _safe_image_stem(image_path)
     last_tile_size_mean_accuracy = 0.0
-    sweep_csv_rows: list[dict[str, object]] = []
+    tile_test_csv_rows: list[dict[str, object]] = []
 
     for tile_sz in tile_sizes:
         tw = th = int(tile_sz)
@@ -882,7 +907,7 @@ def qcrank_ehands_vertex_classification_image_driver(
         print(f"Average total time: {average_total_time:.2f} seconds")
         print(f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds")
 
-        sweep_csv_rows.append(
+        tile_test_csv_rows.append(
             {
                 "image_path": image_path,
                 "tile_size": f"{tw}x{th}",
@@ -911,7 +936,7 @@ def qcrank_ehands_vertex_classification_image_driver(
     with open(results_path, "w", encoding="utf-8", newline="") as rf:
         writer = csv.DictWriter(rf, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(sweep_csv_rows)
+        writer.writerows(tile_test_csv_rows)
     print(f"\nWrote per-tile-size summary to: {results_path}")
 
     return last_tile_size_mean_accuracy
@@ -1488,7 +1513,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Square tile edge length (pixels). If set together with --tile-height, only that "
-            "size is run instead of the default multi-size sweep. Must equal --tile-height."
+            "size is run instead of the default multi-size tile test. Must equal --tile-height."
         ),
     )
     parser.add_argument(
@@ -1564,6 +1589,16 @@ if __name__ == "__main__":
         default=None,
         help="Path to save the results.",
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=("aer", "fake_torino", "fake_marrakesh"),
+        default="aer",
+        help=(
+            "Simulation backend for qiskit_ibm_runtime Sampler: "
+            "aer (AerSimulator), fake_torino, or fake_marrakesh (IBM hardware noise models)."
+        ),
+    )
     args = parser.parse_args()
 
     default_tile_sizes = (2, 4, 8, 16, 64)
@@ -1572,7 +1607,7 @@ if __name__ == "__main__":
     tw, th = args.tile_width, args.tile_height
     if tw is not None or th is not None:
         if tw is None or th is None:
-            parser.error("Use both --tile-width and --tile-height together, or omit both for the default sweep.")
+            parser.error("Use both --tile-width and --tile-height together, or omit both for the default tile test.")
         if tw != th:
             parser.error("Non-square tiles are not supported: --tile-width and --tile-height must be equal.")
         if tw < 1 or th < 1:
@@ -1583,7 +1618,7 @@ if __name__ == "__main__":
 
     weight = 0.5
 
-    sim = configure_aer_sim()
+    sim = build_sim_backend(args.backend)
 
     qcrank_ehands_vertex_classification_image_driver(
         args.isovalue,
