@@ -1,4 +1,5 @@
 import argparse
+import csv
 import io
 from contextlib import redirect_stdout
 from typing import NamedTuple
@@ -742,13 +743,7 @@ def qcrank_ehands_vertex_classification_image_driver(
 
     base_save = save_name if save_name is not None else _safe_image_stem(image_path)
     last_tile_size_mean_accuracy = 0.0
-    results_report_lines = [
-        "Tiled classification sweep - per tile size averages",
-        f"image_path: {image_path}",
-        f"tile_sizes: {tile_sizes}",
-        f"iterations per size: {iterations}",
-        "",
-    ]
+    sweep_csv_rows: list[dict[str, object]] = []
 
     for tile_sz in tile_sizes:
         tw = th = int(tile_sz)
@@ -887,24 +882,36 @@ def qcrank_ehands_vertex_classification_image_driver(
         print(f"Average total time: {average_total_time:.2f} seconds")
         print(f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds")
 
-        results_report_lines.extend(
-            [
-                "=" * 60,
-                f"Tile size {tw}x{th}  (save stem: {run_save_name})",
-                f"Average times and mean accuracy over {n} iterations:",
-                f"Mean accuracy: {average_mean_accuracy:.3f}",
-                f"Average preprocess time: {average_preprocess_time:.2f} seconds",
-                f"Average classification time: {average_classification_time:.2f} seconds",
-                f"Average postprocess time: {average_postprocess_time:.2f} seconds",
-                f"Average total time: {average_total_time:.2f} seconds",
-                f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds",
-                "",
-            ]
+        sweep_csv_rows.append(
+            {
+                "image_path": image_path,
+                "tile_size": f"{tw}x{th}",
+                "iterations": n,
+                "mean_accuracy": round(average_mean_accuracy, 6),
+                "avg_preprocess_s": round(average_preprocess_time, 2),
+                "avg_classification_s": round(average_classification_time, 2),
+                "avg_postprocess_s": round(average_postprocess_time, 2),
+                "avg_total_s": round(average_total_time, 2),
+                "total_time_5iter_s": round(overall_total_time, 2),
+            }
         )
 
-    results_path = f"{base_save}_results.txt"
-    with open(results_path, "w", encoding="utf-8") as rf:
-        rf.write("\n".join(results_report_lines).rstrip() + "\n")
+    results_path = f"{base_save}_results.csv"
+    fieldnames = [
+        "image_path",
+        "tile_size",
+        "iterations",
+        "mean_accuracy",
+        "avg_preprocess_s",
+        "avg_classification_s",
+        "avg_postprocess_s",
+        "avg_total_s",
+        "total_time_5iter_s",
+    ]
+    with open(results_path, "w", encoding="utf-8", newline="") as rf:
+        writer = csv.DictWriter(rf, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(sweep_csv_rows)
     print(f"\nWrote per-tile-size summary to: {results_path}")
 
     return last_tile_size_mean_accuracy
