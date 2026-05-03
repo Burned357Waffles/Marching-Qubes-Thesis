@@ -1,4 +1,7 @@
 import argparse
+import io
+from contextlib import redirect_stdout
+from typing import NamedTuple
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,6 +11,7 @@ import sys
 import re
 from dotenv import load_dotenv
 import os
+import time
 
 import qiskit
 from qiskit import QuantumCircuit
@@ -260,10 +264,16 @@ class VertexClassifier:
         self.eqd.qcEL = [self.qc_main]
 
     def recover_data(self, n_shots, countsL, all_data_list, all_rec_list, verbose=False):
-        data_rec, data_recErr = self.eqd.qcrank_obj.reco_from_yields(countsL)
+        # ParametricQCrankV2.reco_from_yields prints to stdout; mute unless verbose.
+        if verbose:
+            data_rec, data_recErr = self.eqd.qcrank_obj.reco_from_yields(countsL)
+        else:
+            with redirect_stdout(io.StringIO()):
+                data_rec, data_recErr = self.eqd.qcrank_obj.reco_from_yields(countsL)
 
         shpad = n_shots / 2**self.di.nq_addr
-        print(f"Shots per address: {shpad:.1f}, relative error ~ {1/np.sqrt(shpad):.3f}")
+        if verbose:
+            print(f"Shots per address: {shpad:.1f}, relative error ~ {1/np.sqrt(shpad):.3f}")
 
         self.construct_data_lists(data_rec, all_data_list, all_rec_list)
 
@@ -456,13 +466,39 @@ def classification_output_paths(
         )
 
 
-# -------------------------------- Test --------------------------------
+class QcrankImageTilingPreprocess(NamedTuple):
+    """Region, isovalue/method settings, empty canvases and metric accumulators before the tile loop."""
+
+    rw: int
+    rh: int
+    n_tx: int
+    n_ty: int
+    n_tiles: int
+    region_proc: np.ndarray
+    use_method3: bool
+    method3_weight: float
+    image_isovalue_proc: float
+    class_threshold: float
+    padded_canvas_gray: np.ndarray
+    padded_canvas_true: np.ndarray
+    padded_canvas_pred: np.ndarray
+    all_data_list: list
+    all_rec_list: list
+    agg_counts: dict
+    cm_list: list
+    acc_list: list
+    all_correct_vals: list
+    all_incorrect_vals: list
+    all_true_inside_vals: list
+    all_true_outside_vals: list
+    all_classical_minus_iso_vals: list
+    all_quantum_ev_vals: list
+    datapoint_table_payloads: list
 
 
-def qcrank_ehands_vertex_classification_image(
+def prepare_qcrank_ehands_vertex_classification_image(
     isovalue,
     weight,
-    sim,
     image_path,
     tile_width,
     tile_height,
@@ -473,28 +509,11 @@ def qcrank_ehands_vertex_classification_image(
     isovalue_mode="auto_median",
     classification_mode="auto",
     inside_bias=0,
-    save_name=None,
 ):
     """
-    Classify image data in non-overlapping tiles of size tile_width x tile_height.
-
-    isovalue_mode:
-      - 'auto_median': one isovalue for the whole image,
-        the median of all normalized pixels in the region (constant per tile).
-      - 'fixed': use the provided `isovalue` for every tile.
-
-    inside_bias: subtracted from that isovalue (clipped to [-1, 1]). With weight 0.5,
-      class 0 ('inside') requires val >= isovalue, so a positive bias lowers the
-      threshold and yields more 'inside' classifications.
-
-    The region processed starts at (image_x_offset, image_y_offset); its size is
-    region_width x region_height if given, otherwise the remaining image extent.
-    Edge tiles are padded to tile_width x tile_height with normalized black (-1.0) so
-    padded pixels bias toward "outside" under the weighted isovalue rule; the full
-    region is covered without cropping.
+    Load and normalize the region, choose isovalue and method-1 vs method-3 processing,
+    allocate full canvases and per-tile accumulator lists. Does not run the quantum tile loop.
     """
-
-    print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
     print(
         f"inputs (weight: {weight}, tile: {tile_width}x{tile_height}, "
         f"region origin ({image_x_offset}, {image_y_offset}), isovalue_mode={isovalue_mode})"
@@ -551,10 +570,10 @@ def qcrank_ehands_vertex_classification_image(
         if image_isovalue >= 1.0:
             raise ValueError("Method 3 requires isovalue t < 1.0 for w = 1/(1-t).")
         candidate_w = 1.0 / (1.0 - image_isovalue)
-        #if 0.0 <= candidate_w <= 1.0:
+        # if 0.0 <= candidate_w <= 1.0:
         t_prime = (image_isovalue + 1.0) / 2.0
         method3_weight = 1.0 / 2 * (1.0 - t_prime)
-        #method3_weight = candidate_w
+        # method3_weight = candidate_w
         region_proc = (region_gray + 1.0) / 2.0
         image_isovalue_proc = (image_isovalue + 1.0) / 2.0
         class_threshold = 0.5
@@ -562,13 +581,13 @@ def qcrank_ehands_vertex_classification_image(
             "Method 3 enabled: shifted x,t from [-1,1] to [0,1], "
             f"classification threshold set to 0.5, and weight set to w=1/(1-t)={method3_weight:.4f}."
         )
-        #else:
-        #    if classification_mode == "3":
-        #        raise ValueError(
-        #            "Method 3 was forced on, but computed w=1/(1-t)="
-        #            f"{candidate_w:.4f} is outside [0,1]. "
-        #            "Choose --classification-mode 1/auto or adjust isovalue/inside-bias."
-        #        )
+        # else:
+        #     if classification_mode == "3":
+        #         raise ValueError(
+        #             "Method 3 was forced on, but computed w=1/(1-t)="
+        #             f"{candidate_w:.4f} is outside [0,1]. "
+        #             "Choose --classification-mode 1/auto or adjust isovalue/inside-bias."
+        #         )
     else:
         method3_weight = weight
         region_proc = region_gray
@@ -594,21 +613,243 @@ def qcrank_ehands_vertex_classification_image(
     all_true_outside_vals = []
     all_classical_minus_iso_vals = []
     all_quantum_ev_vals = []
+    datapoint_table_payloads = []
 
+    return QcrankImageTilingPreprocess(
+        rw=rw,
+        rh=rh,
+        n_tx=n_tx,
+        n_ty=n_ty,
+        n_tiles=n_tiles,
+        region_proc=region_proc,
+        use_method3=use_method3,
+        method3_weight=method3_weight,
+        image_isovalue_proc=image_isovalue_proc,
+        class_threshold=class_threshold,
+        padded_canvas_gray=padded_canvas_gray,
+        padded_canvas_true=padded_canvas_true,
+        padded_canvas_pred=padded_canvas_pred,
+        all_data_list=all_data_list,
+        all_rec_list=all_rec_list,
+        agg_counts=agg_counts,
+        cm_list=cm_list,
+        acc_list=acc_list,
+        all_correct_vals=all_correct_vals,
+        all_incorrect_vals=all_incorrect_vals,
+        all_true_inside_vals=all_true_inside_vals,
+        all_true_outside_vals=all_true_outside_vals,
+        all_classical_minus_iso_vals=all_classical_minus_iso_vals,
+        all_quantum_ev_vals=all_quantum_ev_vals,
+        datapoint_table_payloads=datapoint_table_payloads,
+    )
+
+
+class ClassificationTileStitchRecord(NamedTuple):
+    """One tile's grayscale input and true/pred label grids for canvas stitching."""
+
+    ty: int
+    tx: int
+    padded_tile: np.ndarray
+    true_tile: np.ndarray
+    pred_tile: np.ndarray
+
+
+def stitch_classification_tiles_into_canvases(pre, tile_width, tile_height, records):
+    """
+    Post-process: write each tile patch into the full-region canvases on ``pre``.
+    ``prepare_qcrank_ehands_vertex_classification_image`` must have allocated the arrays.
+    """
+    for rec in records:
+        ty0 = rec.ty * tile_height
+        tx0 = rec.tx * tile_width
+        ty1 = ty0 + tile_height
+        tx1 = tx0 + tile_width
+        pre.padded_canvas_gray[ty0:ty1, tx0:tx1] = rec.padded_tile
+        pre.padded_canvas_true[ty0:ty1, tx0:tx1] = rec.true_tile
+        pre.padded_canvas_pred[ty0:ty1, tx0:tx1] = rec.pred_tile
+
+
+def build_classification_plot_context(
+    pre,
+    image_path,
+    tile_width,
+    tile_height,
+    image_x_offset,
+    image_y_offset,
+    save_name,
+):
+    """Bundle ``pre`` state and path metadata for plotting (call after stitching)."""
+    return {
+        "image_path": image_path,
+        "rw": pre.rw,
+        "rh": pre.rh,
+        "tile_width": tile_width,
+        "tile_height": tile_height,
+        "image_x_offset": image_x_offset,
+        "image_y_offset": image_y_offset,
+        "save_name": save_name,
+        "acc_list": pre.acc_list,
+        "cm_list": pre.cm_list,
+        "agg_counts": pre.agg_counts,
+        "all_correct_vals": pre.all_correct_vals,
+        "all_incorrect_vals": pre.all_incorrect_vals,
+        "all_true_inside_vals": pre.all_true_inside_vals,
+        "all_true_outside_vals": pre.all_true_outside_vals,
+        "padded_canvas_gray": pre.padded_canvas_gray,
+        "padded_canvas_true": pre.padded_canvas_true,
+        "padded_canvas_pred": pre.padded_canvas_pred,
+        "use_method3": pre.use_method3,
+        "image_isovalue_proc": pre.image_isovalue_proc,
+        "n_tiles": pre.n_tiles,
+        "all_classical_minus_iso_vals": pre.all_classical_minus_iso_vals,
+        "all_quantum_ev_vals": pre.all_quantum_ev_vals,
+    }
+
+
+# -------------------------------- Test --------------------------------
+def qcrank_ehands_vertex_classification_image_driver(
+    isovalue,
+    weight,
+    sim,
+    image_path,
+    tile_width,
+    tile_height,
+    image_x_offset=0,
+    image_y_offset=0,
+    region_width=None,
+    region_height=None,
+    isovalue_mode="auto_median",
+    classification_mode="auto",
+    inside_bias=0,
+    save_name=None,
+):
+
+    # Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
+    print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
+
+    ############## PREPROCESS SECTION ##############
+    preprocess_start_time = time.time()
+    pre = prepare_qcrank_ehands_vertex_classification_image(
+        isovalue=isovalue,
+        weight=weight,
+        image_path=image_path,
+        tile_width=tile_width,
+        tile_height=tile_height,
+        image_x_offset=image_x_offset,
+        image_y_offset=image_y_offset,
+        region_width=region_width,
+        region_height=region_height,
+        isovalue_mode=isovalue_mode,
+        classification_mode=classification_mode,
+        inside_bias=inside_bias,
+    )
+    preprocess_end_time = time.time()
+    preprocess_time = preprocess_end_time - preprocess_start_time
+
+    ############## CLASSIFICATION SECTION ##############
+    classification_start_time = time.time()
+    all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
+        pre,
+        weight,
+        sim,
+        tile_width=tile_width,
+        tile_height=tile_height,
+    )
+
+    classification_end_time = time.time()
+    classification_time = classification_end_time - classification_start_time
+    
+    ############## POSTPROCESS SECTION ##############
+
+    postprocess_start_time = time.time()
+    stitch_classification_tiles_into_canvases(pre, tile_width, tile_height, stitch_records)
+    plot_ctx = build_classification_plot_context(
+        pre,
+        image_path,
+        tile_width,
+        tile_height,
+        image_x_offset,
+        image_y_offset,
+        save_name,
+    )
+    postprocess_end_time = time.time()
+    postprocess_time = postprocess_end_time - postprocess_start_time
+
+    ############## PLOT SECTION ##############
+    print_datapoint_classification_tables_if_any(pre)
+
+    summary_out, side_by_side_out, residual_out = classification_output_paths(
+        plot_ctx["image_path"],
+        plot_ctx["rw"],
+        plot_ctx["rh"],
+        plot_ctx["tile_width"],
+        plot_ctx["tile_height"],
+        plot_ctx["image_x_offset"],
+        plot_ctx["image_y_offset"],
+        plot_ctx["save_name"],
+    )
+
+    print(f"Saving classification summary to: {summary_out}")
+    print(f"Saving side-by-side figure to: {side_by_side_out}")
+    print(f"Saving residual plot to: {residual_out}")
+    plot_classification_summary_figure(
+        region_width=plot_ctx["rw"],
+        region_height=plot_ctx["rh"],
+        tile_width=plot_ctx["tile_width"],
+        tile_height=plot_ctx["tile_height"],
+        acc_list=plot_ctx["acc_list"],
+        cm_list=plot_ctx["cm_list"],
+        agg_counts=plot_ctx["agg_counts"],
+        all_correct_vals=plot_ctx["all_correct_vals"],
+        all_incorrect_vals=plot_ctx["all_incorrect_vals"],
+        all_true_inside_vals=plot_ctx["all_true_inside_vals"],
+        all_true_outside_vals=plot_ctx["all_true_outside_vals"],
+        out_name=summary_out,
+        bins=20,
+    )
+    plot_full_image_vs_classification(
+        plot_ctx["padded_canvas_gray"],
+        plot_ctx["padded_canvas_true"],
+        plot_ctx["padded_canvas_pred"],
+        out_name=side_by_side_out,
+        input_value_range=(0.0, 1.0) if plot_ctx["use_method3"] else (-1.0, 1.0),
+        region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
+    )
+    plot_classical_minus_isovalue_vs_quantum_ev(
+        all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
+        all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
+        out_name=residual_out,
+    )
+
+    ############## SUMMARY ##############
+
+    total_time = preprocess_time + classification_time + postprocess_time
+
+    print(f"\nPreprocess time: {preprocess_time:.2f} seconds")
+    print(f"Classification time: {classification_time:.2f} seconds")
+    print(f"Postprocess time: {postprocess_time:.2f} seconds")
+    print(f"Total time: {total_time:.2f} seconds")
+
+    return all_rec_list, all_data_list
+
+
+def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile_height):
+    stitch_records: list[ClassificationTileStitchRecord] = []
     tile_index = 0
-    for ty in range(n_ty):
-        for tx in range(n_tx):
-            verbose = tile_index == 0
+    for ty in range(pre.n_ty):
+        for tx in range(pre.n_tx):
+            #verbose = tile_index == 0
+            verbose = False
 
             x0 = tx * tile_width
             y0 = ty * tile_height
-            x1 = min(x0 + tile_width, rw)
-            y1 = min(y0 + tile_height, rh)
+            x1 = min(x0 + tile_width, pre.rw)
+            y1 = min(y0 + tile_height, pre.rh)
             w_sub = x1 - x0
             h_sub = y1 - y0
-            pad_value = 0.0 if use_method3 else -1.0
+            pad_value = 0.0 if pre.use_method3 else -1.0
             padded_tile = np.full((tile_height, tile_width), pad_value, dtype=np.float32)
-            padded_tile[:h_sub, :w_sub] = region_proc[y0:y1, x0:x1]
+            padded_tile[:h_sub, :w_sub] = pre.region_proc[y0:y1, x0:x1]
 
             vc = VertexClassifier(0.0)
             vc.init_data(
@@ -620,36 +861,36 @@ def qcrank_ehands_vertex_classification_image(
                 image_y_offset=0,
             )
 
-            vc.isovalue = image_isovalue_proc
-            vc.classification_threshold = class_threshold
-            vc.uses_method3 = use_method3
+            vc.isovalue = pre.image_isovalue_proc
+            vc.classification_threshold = pre.class_threshold
+            vc.uses_method3 = pre.use_method3
 
             vc.encode_c_classify(verbose)
-            vc.compose_iso_qubits(method3_weight, verbose)
+            vc.compose_iso_qubits(pre.method3_weight, verbose)
             vc.add_meas()
 
             n_shots = vc.di.n_data * (2**12)
             countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
-            all_data_list, all_rec_list, data_rec, data_recErr = vc.recover_data(
-                n_shots, countsL, all_data_list, all_rec_list, verbose
-            )
+            vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose)
 
-            classifications = vc.c_classify(all_rec_list)
+            classifications = vc.c_classify(pre.all_rec_list)
             comp = vc.compare_against_input(classifications, weight)
 
-            cm_list.append(comp["confusion_matrix"])
-            acc_list.append(comp["accuracy"])
+            pre.cm_list.append(comp["confusion_matrix"])
+            pre.acc_list.append(comp["accuracy"])
 
             data_vals = vc.di.data_inp[:, 0, 0]
-            quantum_ev_vals = np.asarray(all_rec_list[0][-1])[:, 0, 0]
-            if use_method3:
+            quantum_ev_vals = np.asarray(pre.all_rec_list[0][-1])[:, 0, 0]
+            if pre.use_method3:
                 subtraction_vals = data_vals - vc.isovalue
             else:
-                subtraction_vals = method3_weight * data_vals - (1.0 - method3_weight) * vc.isovalue
+                subtraction_vals = (
+                    pre.method3_weight * data_vals - (1.0 - pre.method3_weight) * vc.isovalue
+                )
 
-            all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
-            all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
+            pre.all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
+            pre.all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
 
             y_t = np.asarray(comp["y_true"]).reshape(-1)
             y_p = np.asarray(comp["y_pred"]).reshape(-1)
@@ -660,30 +901,28 @@ def qcrank_ehands_vertex_classification_image(
             true_outside_mask = y_t == 1
 
             if np.any(true_inside_mask):
-                all_true_inside_vals.append(sub[true_inside_mask])
+                pre.all_true_inside_vals.append(sub[true_inside_mask])
             if np.any(true_outside_mask):
-                all_true_outside_vals.append(sub[true_outside_mask])
+                pre.all_true_outside_vals.append(sub[true_outside_mask])
 
-            print_tile_table = n_tiles == 1 and vc.di.n_data <= 64
-            if print_tile_table:
-                correct_vals, incorrect_vals = print_per_datapoint_classification_table(
-                    data_vals=data_vals,
-                    subtraction_vals=subtraction_vals,
-                    y_true=comp["y_true"],
-                    y_pred=comp["y_pred"],
+            if np.any(correct_mask):
+                pre.all_correct_vals.append(sub[correct_mask])
+            if np.any(incorrect_mask):
+                pre.all_incorrect_vals.append(sub[incorrect_mask])
+
+            # One ASCII table (first tile only) when the circuit is small enough to read.
+            if tile_index == 0 and vc.di.n_data <= 64:
+                pre.datapoint_table_payloads.append(
+                    {
+                        "data_vals": np.asarray(data_vals, dtype=np.float32).copy(),
+                        "subtraction_vals": np.asarray(subtraction_vals, dtype=np.float32).copy(),
+                        "y_true": np.asarray(comp["y_true"]).copy(),
+                        "y_pred": np.asarray(comp["y_pred"]).copy(),
+                    }
                 )
-                if correct_vals is not None:
-                    all_correct_vals.append(correct_vals)
-                if incorrect_vals is not None:
-                    all_incorrect_vals.append(incorrect_vals)
-            else:
-                if np.any(correct_mask):
-                    all_correct_vals.append(sub[correct_mask])
-                if np.any(incorrect_mask):
-                    all_incorrect_vals.append(sub[incorrect_mask])
 
-            agg_counts["0"] += int(np.sum(classifications == 0))
-            agg_counts["1"] += int(np.sum(classifications == 1))
+            pre.agg_counts["0"] += int(np.sum(classifications == 0))
+            pre.agg_counts["1"] += int(np.sum(classifications == 1))
 
             n_pix = tile_width * tile_height
             true_tile = (
@@ -692,68 +931,23 @@ def qcrank_ehands_vertex_classification_image(
             pred_tile = (
                 np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
             )
-            ty0 = ty * tile_height
-            tx0 = tx * tile_width
-            ty1 = ty0 + tile_height
-            tx1 = tx0 + tile_width
-            padded_canvas_gray[ty0:ty1, tx0:tx1] = padded_tile
-            padded_canvas_true[ty0:ty1, tx0:tx1] = true_tile
-            padded_canvas_pred[ty0:ty1, tx0:tx1] = pred_tile
+            stitch_records.append(
+                ClassificationTileStitchRecord(
+                    ty=ty,
+                    tx=tx,
+                    padded_tile=padded_tile,
+                    true_tile=true_tile,
+                    pred_tile=pred_tile,
+                )
+            )
 
             tile_index += 1
 
-    summary_out, side_by_side_out, residual_out = classification_output_paths(
-        image_path,
-        rw,
-        rh,
-        tile_width,
-        tile_height,
-        image_x_offset,
-        image_y_offset,
-        save_name,
-    )
-    print(f"Saving classification summary to: {summary_out}")
-    print(f"Saving side-by-side figure to: {side_by_side_out}")
-    print(f"Saving residual plot to: {residual_out}")
-
-    plot_classification_summary_figure(
-        region_width=rw,
-        region_height=rh,
-        tile_width=tile_width,
-        tile_height=tile_height,
-        acc_list=acc_list,
-        cm_list=cm_list,
-        agg_counts=agg_counts,
-        all_correct_vals=all_correct_vals,
-        all_incorrect_vals=all_incorrect_vals,
-        all_true_inside_vals=all_true_inside_vals,
-        all_true_outside_vals=all_true_outside_vals,
-        out_name=summary_out,
-        bins=20,
-    )
-    plot_full_image_vs_classification(
-        padded_canvas_gray,
-        padded_canvas_true,
-        padded_canvas_pred,
-        out_name=side_by_side_out,
-        input_value_range=(0.0, 1.0) if use_method3 else (-1.0, 1.0),
-        region_size_hw=(rh, rw),
-        tile_size_hw=(tile_height, tile_width),
-        isovalue=image_isovalue_proc,
-        n_tiles=n_tiles,
-    )
-    plot_classical_minus_isovalue_vs_quantum_ev(
-        all_classical_minus_iso_vals=all_classical_minus_iso_vals,
-        all_quantum_ev_vals=all_quantum_ev_vals,
-        out_name=residual_out,
-    )
-
-    print("Returning data and recovered data lists (last tile only)")
-    return all_rec_list, all_data_list
+    return pre.all_rec_list, pre.all_data_list, pre, stitch_records
 
 
 # -------------------------------- Plots --------------------------------
-
+# Credit to CursorAI for the following plot functions
 
 def plot_full_image_vs_classification(
     input_image,
@@ -762,10 +956,7 @@ def plot_full_image_vs_classification(
     out_name,
     *,
     input_value_range=(-1.0, 1.0),
-    isovalue=None,
     region_size_hw=None,
-    tile_size_hw=None,
-    n_tiles=None,
 ):
     font_size_delta = 5
     input_image = np.asarray(input_image, dtype=np.float32)
@@ -1056,11 +1247,17 @@ def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true
     return correct_vals, incorrect_vals
 
 
+def print_datapoint_classification_tables_if_any(pre):
+    """Deferred per-datapoint ASCII tables (after classification; first tile only when n_data <= 64)."""
+    for payload in pre.datapoint_table_payloads:
+        print_per_datapoint_classification_table(**payload)
+
+
 def plot_classification_summary_figure(region_width, region_height, tile_width, tile_height, acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, all_true_inside_vals, all_true_outside_vals, out_name, bins=20):
     font_size_delta = 5
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
     title = f"Mean accuracy over {region_width}x{region_height} region, with {len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
-    print(title)
+    print(f"\n{title}\n")
 
     fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
     ax_true_hist, ax_hist, ax_cm = ax_arr
@@ -1287,7 +1484,7 @@ if __name__ == "__main__":
 
     sim = configure_aer_sim()
 
-    qcrank_ehands_vertex_classification_image(
+    qcrank_ehands_vertex_classification_image_driver(
         args.isovalue,
         weight,
         sim,
