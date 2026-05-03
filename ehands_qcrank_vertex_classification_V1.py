@@ -1,7 +1,3 @@
-"""
-QCrank eHANDS classical (C) vertex classification on a tiled image — flat buffer layout.
-"""
-
 import argparse
 from PIL import Image
 import numpy as np
