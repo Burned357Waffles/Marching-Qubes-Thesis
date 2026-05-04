@@ -384,11 +384,6 @@ def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
         fig_qc = qc.draw("mpl")
         fig_qc.savefig("qc.png")
         plt.close(fig_qc)
-    
-    qc = eqd.qc
-    fig_qc = qc.draw("mpl")
-    fig_qc.savefig("qc.png")
-    plt.close(fig_qc)
 
     return countsL
 
