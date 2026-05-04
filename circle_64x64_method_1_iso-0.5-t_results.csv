@@ -1,0 +1,2 @@
+image_path,tile_size,iterations,mean_accuracy,avg_preprocess_s,avg_classification_s,avg_postprocess_s,avg_total_s,total_time_5iter_s
+test_images\test_concentric_circles_64x64.png,8x8,5,0.997119,0.0,40.51,0.0,40.51,202.53

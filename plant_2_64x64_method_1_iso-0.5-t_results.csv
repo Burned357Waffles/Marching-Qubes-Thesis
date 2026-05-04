@@ -1,0 +1,2 @@
+image_path,tile_size,iterations,mean_accuracy,avg_preprocess_s,avg_classification_s,avg_postprocess_s,avg_total_s,total_time_5iter_s
+test_images\Plant_tissue_sections_2_64x64.jpg,8x8,5,0.98208,0.0,41.28,0.0,41.28,206.39
