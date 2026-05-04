@@ -212,13 +212,12 @@ class VertexClassifier:
         return qc.compose(qc_add, qubits=[q_a, q_b])
 
     def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, c_mode="1", negation=True, verbose=False):
-        qc_iso = QuantumCircuit(1, 1)
         if c_mode == "1":
+            qc_iso = QuantumCircuit(1, 1)
             qc_iso.ry(np.arccos(self.isovalue), 0)
+            qc.compose(qc_iso, placement_q, inplace=True)
         else:
-            qc_iso.x(0)
-
-        qc.compose(qc_iso, placement_q, inplace=True)
+            negation = False
 
         qc.barrier()
         qc = self.ehands_addition(qc, data_q, placement_q, weight=weight, negation=negation, verbose=verbose)
@@ -385,6 +384,11 @@ def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
         fig_qc = qc.draw("mpl")
         fig_qc.savefig("qc.png")
         plt.close(fig_qc)
+    
+    qc = eqd.qc
+    fig_qc = qc.draw("mpl")
+    fig_qc.savefig("qc.png")
+    plt.close(fig_qc)
 
     return countsL
 
@@ -766,185 +770,200 @@ def qcrank_ehands_vertex_classification_image_driver(
 ):
     # Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
     print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
-    print(f"Tile sizes: {tile_sizes}, {iterations} iterations per size.")
+    if isinstance(shots_coef, (int, float)):
+        shots_coef_iter = (int(shots_coef),)
+    else:
+        shots_coef_iter = tuple(int(x) for x in shots_coef)
+    print(
+        f"Shots exponents k (n_shots = n_data * 2**k per tile): {shots_coef_iter}; "
+        f"tile sizes: {tile_sizes}; {iterations} iterations per (k, tile size)."
+    )
 
     base_save = save_name if save_name is not None else _safe_image_stem(image_path)
     last_tile_size_mean_accuracy = 0.0
     tile_test_csv_rows: list[dict[str, object]] = []
-    
-    # Iterate over each tile size
-    for tile_sz in tile_sizes:
-        tw = th = int(tile_sz)
-        run_save_name = f"{base_save}_{tw}x{th}"
-        print(f"\n{'=' * 60}\nTile size {tw}x{th}  (save stem: {run_save_name})\n{'=' * 60}")
 
-        total_preprocess_time = 0.0
-        total_classification_time = 0.0
-        total_postprocess_time = 0.0
-        total_mean_accuracy = 0.0
+    for sc in shots_coef_iter:
+        print(f"\n{'#' * 60}\nShots coefficient k = {sc}  (shot scale 2**{sc} = {2**sc})\n{'#' * 60}")
+        # Iterate over each tile size
+        for tile_sz in tile_sizes:
+            tw = th = int(tile_sz)
+            run_save_name = f"{base_save}_sc{sc}_{tw}x{th}"
+            print(f"\n{'=' * 60}\n[k={sc}] Tile size {tw}x{th}  (save stem: {run_save_name})\n{'=' * 60}")
 
-        for i in range(iterations):
-            print(f"\nIteration {i + 1}:")
-            ############## PREPROCESS SECTION ##############
-            preprocess_start_time = time.time()
-            pre = prepare_qcrank_ehands_vertex_classification_image(
-                isovalue=isovalue,
-                weight=weight,
-                image_path=image_path,
-                tile_width=tw,
-                tile_height=th,
-                image_x_offset=image_x_offset,
-                image_y_offset=image_y_offset,
-                region_width=region_width,
-                region_height=region_height,
-                isovalue_mode=isovalue_mode,
-                inside_bias=inside_bias,
-            )
-            if c_mode == "2":
-                # make t'
-                pre.image_isovalue_proc = (pre.image_isovalue_proc + 1) / 2
 
-                # make x'
-                pre.region_proc = (pre.region_proc + 1) / 2
+            total_preprocess_time = 0.0
+            total_classification_time = 0.0
+            total_postprocess_time = 0.0
+            total_mean_accuracy = 0.0
 
-                # make w'
-                pre.compose_weight = 1 / (2 * (1 - pre.image_isovalue_proc))
+            for i in range(iterations):
+                print(f"\nIteration {i + 1}:")
+                ############## PREPROCESS SECTION ##############
+                preprocess_start_time = time.time()
+                pre = prepare_qcrank_ehands_vertex_classification_image(
+                    isovalue=isovalue,
+                    weight=weight,
+                    image_path=image_path,
+                    tile_width=tw,
+                    tile_height=th,
+                    image_x_offset=image_x_offset,
+                    image_y_offset=image_y_offset,
+                    region_width=region_width,
+                    region_height=region_height,
+                    isovalue_mode=isovalue_mode,
+                    inside_bias=inside_bias,
+                )
+                if c_mode == "2":
+                    # make t'
+                    pre.image_isovalue_proc = (pre.image_isovalue_proc + 1) / 2
 
-                # set new classification threshold
-                pre.class_threshold = 0.5
+                    # make x'
+                    pre.region_proc = (pre.region_proc + 1) / 2
+
+                    # make w'
+                    pre.compose_weight = 1 / (2 * (1 - pre.image_isovalue_proc))
+
+                    # set new classification threshold
+                    pre.class_threshold = 0.5
                           
-            preprocess_end_time = time.time()
-            preprocess_time = preprocess_end_time - preprocess_start_time
+                preprocess_end_time = time.time()
+                preprocess_time = preprocess_end_time - preprocess_start_time
 
-            ############## CLASSIFICATION SECTION ##############
-            classification_start_time = time.time()
-            all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
-                pre,
-                weight,
-                sim,
-                tile_width=tw,
-                tile_height=th,
-                c_mode=c_mode,
+                ############## CLASSIFICATION SECTION ##############
+                classification_start_time = time.time()
+                all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
+                    pre,
+                    weight,
+                    sim,
+                    tile_width=tw,
+                    tile_height=th,
+                    c_mode=c_mode,
+                    shots_coef=sc,
+                )
+
+                classification_end_time = time.time()
+                classification_time = classification_end_time - classification_start_time
+
+                ############## POSTPROCESS SECTION ##############
+                postprocess_start_time = time.time()
+                stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
+                plot_ctx = build_classification_plot_context(
+                    pre,
+                    image_path,
+                    tw,
+                    th,
+                    image_x_offset,
+                    image_y_offset,
+                    run_save_name,
+                )
+                postprocess_end_time = time.time()
+                postprocess_time = postprocess_end_time - postprocess_start_time
+
+                ############## PLOT SECTION ##############
+                print_datapoint_classification_tables_if_any(pre)
+
+                summary_out, side_by_side_out, residual_out = classification_output_paths(
+                    plot_ctx["image_path"],
+                    plot_ctx["rw"],
+                    plot_ctx["rh"],
+                    plot_ctx["tile_width"],
+                    plot_ctx["tile_height"],
+                    plot_ctx["image_x_offset"],
+                    plot_ctx["image_y_offset"],
+                    plot_ctx["save_name"],
+                )
+
+                print(f"Saving classification summary to: {summary_out}")
+                print(f"Saving side-by-side figure to: {side_by_side_out}")
+                print(f"Saving residual plot to: {residual_out}")
+                mean_accuracy = plot_classification_summary_figure(
+                    region_width=plot_ctx["rw"],
+                    region_height=plot_ctx["rh"],
+                    tile_width=plot_ctx["tile_width"],
+                    tile_height=plot_ctx["tile_height"],
+                    acc_list=plot_ctx["acc_list"],
+                    cm_list=plot_ctx["cm_list"],
+                    agg_counts=plot_ctx["agg_counts"],
+                    all_correct_vals=plot_ctx["all_correct_vals"],
+                    all_incorrect_vals=plot_ctx["all_incorrect_vals"],
+                    all_true_inside_vals=plot_ctx["all_true_inside_vals"],
+                    all_true_outside_vals=plot_ctx["all_true_outside_vals"],
+                    out_name=summary_out,
+                    bins=20,
+                )
+
+                if c_mode == "1":
+                    input_value_range = (-1.0, 1.0)
+                else:
+                    input_value_range = (0.0, 1.0)
+                plot_full_image_vs_classification(
+                    plot_ctx["padded_canvas_gray"],
+                    plot_ctx["padded_canvas_true"],
+                    plot_ctx["padded_canvas_pred"],
+                    out_name=side_by_side_out,
+                    input_value_range=input_value_range,
+                    region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
+                )
+                plot_classical_minus_isovalue_vs_quantum_ev(
+                    all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
+                    all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
+                    out_name=residual_out,
+                )
+
+                ############## SUMMARY ##############
+
+                total_time = preprocess_time + classification_time + postprocess_time
+                total_preprocess_time += preprocess_time
+                total_classification_time += classification_time
+                total_postprocess_time += postprocess_time
+                total_mean_accuracy += mean_accuracy
+
+                print(f"\nPreprocess time for iteration {i + 1}: {preprocess_time:.2f} seconds")
+                print(f"Classification time for iteration {i + 1}: {classification_time:.2f} seconds")
+                print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
+                print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
+
+            n = iterations
+            average_mean_accuracy = total_mean_accuracy / n
+            average_preprocess_time = total_preprocess_time / n
+            average_classification_time = total_classification_time / n
+            average_postprocess_time = total_postprocess_time / n
+            average_total_time = average_preprocess_time + average_classification_time + average_postprocess_time
+            overall_total_time = total_preprocess_time + total_classification_time + total_postprocess_time
+            last_tile_size_mean_accuracy = average_mean_accuracy
+
+            print(
+                f"\nAverage times and mean accuracy for k={sc}, tile {tw}x{th} over {n} iterations:\n"
             )
+            print(f"Mean accuracy: {average_mean_accuracy:.3f}")
+            print(f"Average preprocess time: {average_preprocess_time:.2f} seconds")
+            print(f"Average classification time: {average_classification_time:.2f} seconds")
+            print(f"Average postprocess time: {average_postprocess_time:.2f} seconds")
+            print(f"Average total time: {average_total_time:.2f} seconds")
+            print(f"Total time for k={sc}, tile {tw}x{th}: {overall_total_time:.2f} seconds")
 
-            classification_end_time = time.time()
-            classification_time = classification_end_time - classification_start_time
-
-            ############## POSTPROCESS SECTION ##############
-            postprocess_start_time = time.time()
-            stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
-            plot_ctx = build_classification_plot_context(
-                pre,
-                image_path,
-                tw,
-                th,
-                image_x_offset,
-                image_y_offset,
-                run_save_name,
+            tile_test_csv_rows.append(
+                {
+                    "image_path": image_path,
+                    "shots_coef": sc,
+                    "shot_scale_2_pow_k": 2**sc,
+                    "tile_size": f"{tw}x{th}",
+                    "iterations": n,
+                    "mean_accuracy": round(average_mean_accuracy, 6),
+                    "avg_preprocess_s": round(average_preprocess_time, 2),
+                    "avg_classification_s": round(average_classification_time, 2),
+                    "avg_postprocess_s": round(average_postprocess_time, 2),
+                    "avg_total_s": round(average_total_time, 2),
+                    "total_time_5iter_s": round(overall_total_time, 2),
+                }
             )
-            postprocess_end_time = time.time()
-            postprocess_time = postprocess_end_time - postprocess_start_time
-
-            ############## PLOT SECTION ##############
-            print_datapoint_classification_tables_if_any(pre)
-
-            summary_out, side_by_side_out, residual_out = classification_output_paths(
-                plot_ctx["image_path"],
-                plot_ctx["rw"],
-                plot_ctx["rh"],
-                plot_ctx["tile_width"],
-                plot_ctx["tile_height"],
-                plot_ctx["image_x_offset"],
-                plot_ctx["image_y_offset"],
-                plot_ctx["save_name"],
-            )
-
-            print(f"Saving classification summary to: {summary_out}")
-            print(f"Saving side-by-side figure to: {side_by_side_out}")
-            print(f"Saving residual plot to: {residual_out}")
-            mean_accuracy = plot_classification_summary_figure(
-                region_width=plot_ctx["rw"],
-                region_height=plot_ctx["rh"],
-                tile_width=plot_ctx["tile_width"],
-                tile_height=plot_ctx["tile_height"],
-                acc_list=plot_ctx["acc_list"],
-                cm_list=plot_ctx["cm_list"],
-                agg_counts=plot_ctx["agg_counts"],
-                all_correct_vals=plot_ctx["all_correct_vals"],
-                all_incorrect_vals=plot_ctx["all_incorrect_vals"],
-                all_true_inside_vals=plot_ctx["all_true_inside_vals"],
-                all_true_outside_vals=plot_ctx["all_true_outside_vals"],
-                out_name=summary_out,
-                bins=20,
-            )
-
-            if c_mode == "1":
-                input_value_range = (-1.0, 1.0)
-            else:
-                input_value_range = (0.0, 1.0)
-            plot_full_image_vs_classification(
-                plot_ctx["padded_canvas_gray"],
-                plot_ctx["padded_canvas_true"],
-                plot_ctx["padded_canvas_pred"],
-                out_name=side_by_side_out,
-                input_value_range=input_value_range,
-                region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
-            )
-            plot_classical_minus_isovalue_vs_quantum_ev(
-                all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
-                all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
-                out_name=residual_out,
-            )
-
-            ############## SUMMARY ##############
-
-            total_time = preprocess_time + classification_time + postprocess_time
-            total_preprocess_time += preprocess_time
-            total_classification_time += classification_time
-            total_postprocess_time += postprocess_time
-            total_mean_accuracy += mean_accuracy
-
-            print(f"\nPreprocess time for iteration {i + 1}: {preprocess_time:.2f} seconds")
-            print(f"Classification time for iteration {i + 1}: {classification_time:.2f} seconds")
-            print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
-            print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
-
-        n = iterations
-        average_mean_accuracy = total_mean_accuracy / n
-        average_preprocess_time = total_preprocess_time / n
-        average_classification_time = total_classification_time / n
-        average_postprocess_time = total_postprocess_time / n
-        average_total_time = average_preprocess_time + average_classification_time + average_postprocess_time
-        overall_total_time = total_preprocess_time + total_classification_time + total_postprocess_time
-        last_tile_size_mean_accuracy = average_mean_accuracy
-
-        print(
-            f"\nAverage times and mean accuracy for tile {tw}x{th} over {n} iterations:\n"
-        )
-        print(f"Mean accuracy: {average_mean_accuracy:.3f}")
-        print(f"Average preprocess time: {average_preprocess_time:.2f} seconds")
-        print(f"Average classification time: {average_classification_time:.2f} seconds")
-        print(f"Average postprocess time: {average_postprocess_time:.2f} seconds")
-        print(f"Average total time: {average_total_time:.2f} seconds")
-        print(f"Total time for tile {tw}x{th}: {overall_total_time:.2f} seconds")
-
-        tile_test_csv_rows.append(
-            {
-                "image_path": image_path,
-                "tile_size": f"{tw}x{th}",
-                "iterations": n,
-                "mean_accuracy": round(average_mean_accuracy, 6),
-                "avg_preprocess_s": round(average_preprocess_time, 2),
-                "avg_classification_s": round(average_classification_time, 2),
-                "avg_postprocess_s": round(average_postprocess_time, 2),
-                "avg_total_s": round(average_total_time, 2),
-                "total_time_5iter_s": round(overall_total_time, 2),
-            }
-        )
 
     results_path = f"{base_save}_results.csv"
     fieldnames = [
         "image_path",
+        "shots_coef",
+        "shot_scale_2_pow_k",
         "tile_size",
         "iterations",
         "mean_accuracy",
@@ -958,10 +977,704 @@ def qcrank_ehands_vertex_classification_image_driver(
         writer = csv.DictWriter(rf, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(tile_test_csv_rows)
-    print(f"\nWrote per-tile-size summary to: {results_path}")
+    print(f"\nWrote per-(shots_coef, tile size) summary to: {results_path}")
 
     return last_tile_size_mean_accuracy
 
+def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile_height, c_mode="1", shots_coef=12):
+    stitch_records: list[ClassificationTileStitchRecord] = []
+    tile_index = 0
+    for ty in range(pre.n_ty):
+        for tx in range(pre.n_tx):
+            #verbose = tile_index == 0
+            verbose = False
+
+            x0 = tx * tile_width
+            y0 = ty * tile_height
+            x1 = min(x0 + tile_width, pre.rw)
+            y1 = min(y0 + tile_height, pre.rh)
+            w_sub = x1 - x0
+            h_sub = y1 - y0
+            padded_tile = np.full((tile_height, tile_width), -1.0, dtype=np.float32)
+            padded_tile[:h_sub, :w_sub] = pre.region_proc[y0:y1, x0:x1]
+
+            vc = VertexClassifier(0.0)
+            vc.init_data(
+                image_path=None,
+                image_array=padded_tile,
+                image_width=tile_width,
+                image_height=tile_height,
+                image_x_offset=0,
+                image_y_offset=0,
+            )
+
+            vc.isovalue = pre.image_isovalue_proc
+            vc.classification_threshold = pre.class_threshold
+
+            vc.encode_c_classify(verbose)
+            vc.compose_iso_qubits(pre.compose_weight, c_mode=c_mode, verbose=verbose)
+            vc.add_meas()
+
+            n_shots = vc.di.n_data * (2**shots_coef)
+            countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+
+            vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose)
+
+            classifications = vc.c_classify(pre.all_rec_list)
+            comp = vc.compare_against_input(classifications, weight)
+
+            pre.cm_list.append(comp["confusion_matrix"])
+            pre.acc_list.append(comp["accuracy"])
+
+            data_vals = vc.di.data_inp[:, 0, 0]
+            quantum_ev_vals = np.asarray(pre.all_rec_list[0][-1])[:, 0, 0]
+            subtraction_vals = (
+                pre.compose_weight * data_vals - (1.0 - pre.compose_weight) * vc.isovalue
+            )
+
+            pre.all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
+            pre.all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
+
+            y_t = np.asarray(comp["y_true"]).reshape(-1)
+            y_p = np.asarray(comp["y_pred"]).reshape(-1)
+            sub = np.asarray(subtraction_vals).reshape(-1)
+            correct_mask = y_t == y_p
+            incorrect_mask = ~correct_mask
+            true_inside_mask = y_t == 0
+            true_outside_mask = y_t == 1
+
+            if np.any(true_inside_mask):
+                pre.all_true_inside_vals.append(sub[true_inside_mask])
+            if np.any(true_outside_mask):
+                pre.all_true_outside_vals.append(sub[true_outside_mask])
+
+            if np.any(correct_mask):
+                pre.all_correct_vals.append(sub[correct_mask])
+            if np.any(incorrect_mask):
+                pre.all_incorrect_vals.append(sub[incorrect_mask])
+
+            # One ASCII table (first tile only) when the circuit is small enough to read.
+            if tile_index == 0 and vc.di.n_data <= 64:
+                pre.datapoint_table_payloads.append(
+                    {
+                        "data_vals": np.asarray(data_vals, dtype=np.float32).copy(),
+                        "subtraction_vals": np.asarray(subtraction_vals, dtype=np.float32).copy(),
+                        "y_true": np.asarray(comp["y_true"]).copy(),
+                        "y_pred": np.asarray(comp["y_pred"]).copy(),
+                    }
+                )
+
+            pre.agg_counts["0"] += int(np.sum(classifications == 0))
+            pre.agg_counts["1"] += int(np.sum(classifications == 1))
+
+            n_pix = tile_width * tile_height
+            true_tile = (
+                np.asarray(comp["y_true"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+            )
+            pred_tile = (
+                np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+            )
+            stitch_records.append(
+                ClassificationTileStitchRecord(
+                    ty=ty,
+                    tx=tx,
+                    padded_tile=padded_tile,
+                    true_tile=true_tile,
+                    pred_tile=pred_tile,
+                )
+            )
+
+            tile_index += 1
+
+    return pre.all_rec_list, pre.all_data_list, pre, stitch_records
+
+
+# -------------------------------- Plots --------------------------------
+# Credit to CursorAI for the following plot functions
+
+def plot_full_image_vs_classification(
+    input_image,
+    true_image,
+    predicted_image,
+    out_name,
+    *,
+    input_value_range=(-1.0, 1.0),
+    region_size_hw=None,
+):
+    font_size_delta = 5
+    input_image = np.asarray(input_image, dtype=np.float32)
+    true_image = np.asarray(true_image, dtype=np.int32)
+    predicted_image = np.asarray(predicted_image, dtype=np.int32)
+    h, w = input_image.shape
+    fig_w = min(22.0, max(10.0, w / 32.0 + 4.0))
+    fig_h = min(14.0, max(5.0, h / 32.0 + 2.0))
+    fig, axes = plt.subplots(1, 3, figsize=(1.65 * fig_w, fig_h))
+
+    ax_input, ax_true, ax_pred = axes
+    in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
+    im0 = ax_input.imshow(
+        input_image, cmap="gray", vmin=in_vmin, vmax=in_vmax, origin="upper", zorder=1
+    )
+
+    n_pad = 0
+    if region_size_hw is not None:
+        rh_i, rw_i = int(region_size_hw[0]), int(region_size_hw[1])
+        cy = np.arange(h)[:, np.newaxis]
+        cx = np.arange(w)[np.newaxis, :]
+        pad_mask = (cy >= rh_i) | (cx >= rw_i)
+        n_pad = int(np.sum(pad_mask))
+        if n_pad > 0:
+            for ax in (ax_input, ax_true, ax_pred):
+                ov = np.zeros((h, w, 4), dtype=np.float32)
+                ov[pad_mask] = (0.95, 0.15, 0.65, 0.55)
+                ax.imshow(ov, origin="upper", interpolation="nearest", zorder=2)
+            ax_input.set_title("Input Image Grayscale (magenta = padded band, -1)")
+        else:
+            ax_input.set_title(
+                "Input Image Grayscale"
+            )
+    else:
+        ax_input.set_title("Input Image Grayscale (full region)")
+    ax_input.set_xlabel("x")
+    ax_input.set_ylabel("y")
+    # Keep subplot widths symmetric by attaching the colorbar inside the first panel.
+    cax0 = ax_input.inset_axes([1.02, 0.08, 0.025, 0.84])
+    cbar0 = fig.colorbar(
+        im0,
+        cax=cax0,
+        ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax],
+    )
+    cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
+    for tick in cbar0.ax.get_yticklabels():
+        tick.set_fontsize(tick.get_fontsize() + font_size_delta)
+
+    ax_true.imshow(
+        true_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
+    )
+    if region_size_hw is not None:
+        if n_pad > 0:
+            ax_true.set_title("Classical Classifications (magenta = padded band)")
+        else:
+            ax_true.set_title("Classical Classifications")
+    else:
+        ax_true.set_title("Classical Classifications")
+    ax_true.set_xlabel("x")
+    ax_true.set_ylabel("y")
+    cmap = plt.get_cmap("viridis_r")
+    ax_true.legend(
+        handles=[
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
+        ],
+        loc="upper right",
+        framealpha=0.95,
+    )
+
+    im1 = ax_pred.imshow(
+        predicted_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
+    )
+    if region_size_hw is not None:
+        if n_pad > 0:
+            ax_pred.set_title("Quantum Classifications (magenta = padded band)")
+        else:
+            ax_pred.set_title("Quantum Classifications")
+    else:
+        ax_pred.set_title("Quantum Classifications")
+    ax_pred.set_xlabel("x")
+    ax_pred.set_ylabel("y")
+    ax_pred.legend(
+        handles=[
+            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
+            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
+        ],
+        loc="upper right",
+        framealpha=0.95,
+    )
+
+    xt = axis_ticks(w)
+    yt = axis_ticks(h)
+    for ax in (ax_input, ax_true, ax_pred):
+        ax.set_xticks(xt)
+        ax.set_yticks(yt)
+        increase_axis_text_size(ax, delta_points=font_size_delta)
+
+    fig.tight_layout()
+
+    fig.savefig(out_name, bbox_inches="tight", dpi=150)
+    print(f"Saved full image vs classification plot to: {out_name}")
+
+def axis_ticks(n, step=10):
+    """Pixel-axis tick positions; labels only at multiples of `step` (no extra edge tick)."""
+    if n <= 0:
+        return np.array([], dtype=int)
+    return np.asarray(list(range(0, n, step)), dtype=int)
+
+
+def increase_axis_text_size(ax, delta_points=5):
+    """Increase axis/legend/tick/text sizes by a fixed point delta."""
+    ax.title.set_fontsize(ax.title.get_fontsize() + delta_points)
+    ax.xaxis.label.set_fontsize(ax.xaxis.label.get_fontsize() + delta_points)
+    ax.yaxis.label.set_fontsize(ax.yaxis.label.get_fontsize() + delta_points)
+
+    for tick in ax.get_xticklabels() + ax.get_yticklabels():
+        tick.set_fontsize(tick.get_fontsize() + delta_points)
+
+    legend = ax.get_legend()
+    if legend is not None:
+        for text in legend.get_texts():
+            text.set_fontsize(text.get_fontsize() + delta_points)
+        legend_title = legend.get_title()
+        if legend_title is not None:
+            legend_title.set_fontsize(legend_title.get_fontsize() + delta_points)
+
+    for text in ax.texts:
+        text.set_fontsize(text.get_fontsize() + delta_points)
+
+def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
+    if ax is None:
+        ax = plt.gca()
+
+    if not (all_correct_vals or all_incorrect_vals):
+        ax.set_title("Quantum Classification: correct vs incorrect classifications")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        return
+
+    concat_correct = (
+        np.concatenate(all_correct_vals) if all_correct_vals else np.array([])
+    )
+    concat_incorrect = (
+        np.concatenate(all_incorrect_vals) if all_incorrect_vals else np.array([])
+    )
+
+    parts = [a for a in (concat_correct, concat_incorrect) if a.size]
+    bin_edges = np.histogram_bin_edges(np.concatenate(parts), bins=bins)
+
+    if concat_correct.size:
+        ax.hist(concat_correct, bins=bin_edges, alpha=0.6, label="Correct", color="tab:blue")
+    if concat_incorrect.size:
+        ax.hist(concat_incorrect, bins=bin_edges, alpha=0.6, label="Incorrect", color="tab:orange")
+
+    ax.set_xlabel("Input data value after weighted subtraction")
+    ax.set_ylabel("Number of Samples")
+    ax.set_title("Quantum Classification: correct vs incorrect classifications")
+    ax.legend()
+
+
+def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
+    """Diagonal = correct (Blues, scaled within diagonal); off-diagonal = error (Oranges, scaled within errors)."""
+    if ax is None:
+        ax = plt.gca()
+
+    total_cm = np.asarray(total_cm, dtype=float)
+    cmap_blue = plt.colormaps["Blues"]
+    cmap_orange = plt.colormaps["Oranges"]
+
+    diag_max = max(total_cm[0, 0], total_cm[1, 1])
+    if diag_max <= 0:
+        diag_max = 1.0
+    rgba = np.zeros((2, 2, 4), dtype=np.float64)
+    for i in range(2):
+        for j in range(2):
+            val = total_cm[i, j]
+            if i == j:
+                t = val / diag_max
+                rgba[i, j] = cmap_blue(0.22 + 0.73 * t)
+            else:
+                t = val / diag_max
+                rgba[i, j] = cmap_orange(0.28 + 0.67 * t)
+
+    ax.imshow(rgba, interpolation="nearest")
+    ax.set_title(title, fontsize=10)
+
+    tick_marks = np.arange(2)
+    ax.set_xticks(tick_marks)
+    ax.set_xticklabels(["Pred Inside", "Pred Outside"])
+    ax.set_yticks(tick_marks)
+    ax.set_yticklabels(["True Inside", "True Outside"])
+    ax.set_xlabel("Predicted Class")
+    ax.set_ylabel("True Class")
+
+    for i in range(2):
+        for j in range(2):
+            val = int(total_cm[i, j])
+            r, g, b, _ = rgba[i, j]
+            luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            ax.text(
+                j,
+                i,
+                val,
+                ha="center",
+                va="center",
+                color=("black" if luminance > 0.6 else "white"),
+            )
+
+
+def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
+    if ax is None:
+        ax = plt.gca()
+
+    labels = ["0", "1"]
+    values = [agg_counts["0"], agg_counts["1"]]
+    ax.bar(labels, values, color=["tab:blue", "tab:orange"])
+    ax.set_xlabel("Predicted class (final bit)")
+    ax.set_ylabel("Number of Samples")
+    ax.set_title("Aggregated Predicted Class Counts")
+
+
+def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals, bins=20, ax=None):
+    if ax is None:
+        ax = plt.gca()
+
+    if not (all_true_inside_vals or all_true_outside_vals):
+        ax.set_title("True input data distribution")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        return
+
+    concat_true_inside = np.concatenate(all_true_inside_vals) if all_true_inside_vals else np.array([])
+    concat_true_outside = np.concatenate(all_true_outside_vals) if all_true_outside_vals else np.array([])
+    all_true_vals = np.concatenate([a for a in (concat_true_inside, concat_true_outside) if a.size])
+    bin_edges = np.histogram_bin_edges(all_true_vals, bins=bins)
+
+    ax.hist(
+        all_true_vals,
+        bins=bin_edges,
+        alpha=0.75,
+        color="tab:blue",
+    )
+
+    ax.set_xlabel("Input data value after weighted subtraction")
+    ax.set_ylabel("Number of Samples")
+    ax.set_title("Classical Classification")
+
+
+def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
+    y_true = np.asarray(y_true).reshape(-1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    data_vals = np.asarray(data_vals).reshape(-1)
+    subtraction_vals = np.asarray(subtraction_vals).reshape(-1)
+
+    print("\nPer-data-point classifications")
+    print("+--------+---------------+------------------+--------------+----------------+")
+    print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
+    print("+--------+---------------+------------------+--------------+----------------+")
+    for idx, (val, sub_val, y_t, y_p) in enumerate(
+        zip(data_vals, subtraction_vals, y_true, y_pred)
+    ):
+        print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {int(y_t):<12d} | {int(y_p):<14d} |")
+    print("+--------+---------------+------------------+--------------+----------------+")
+
+    correct_mask = y_true == y_pred
+    incorrect_mask = ~correct_mask
+
+    correct_vals = subtraction_vals[correct_mask] if np.any(correct_mask) else None
+    incorrect_vals = subtraction_vals[incorrect_mask] if np.any(incorrect_mask) else None
+
+    if correct_vals is not None:
+        print(
+            "Correct classifications value range: "
+            f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]"
+        )
+    else:
+        print("No correct classifications in this run.")
+
+    if incorrect_vals is not None:
+        print(
+            "Incorrect classifications value range: "
+            f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]"
+        )
+    else:
+        print("No incorrect classifications in this run.")
+
+    return correct_vals, incorrect_vals
+
+
+def print_datapoint_classification_tables_if_any(pre):
+    """Deferred per-datapoint ASCII tables (after classification; first tile only when n_data <= 64)."""
+    for payload in pre.datapoint_table_payloads:
+        print_per_datapoint_classification_table(**payload)
+
+
+def plot_classification_summary_figure(region_width, region_height, tile_width, tile_height, acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, all_true_inside_vals, all_true_outside_vals, out_name, bins=20):
+    font_size_delta = 5
+    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
+    title = f"Mean accuracy over {region_width}x{region_height} region, with {len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
+    print(f"\n{title}\n")
+
+    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
+    ax_true_hist, ax_hist, ax_cm = ax_arr
+
+    # Classical Classification
+    plot_true_class_input_histogram(
+        all_true_inside_vals,
+        all_true_outside_vals,
+        bins=bins,
+        ax=ax_true_hist,
+    )
+
+    # Quantum Classification
+    plot_correct_incorrect_input_histogram(
+        all_correct_vals,
+        all_incorrect_vals,
+        bins=bins,
+        ax=ax_hist,
+    )
+
+    # Confusion Matrix
+    if cm_list:
+        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
+        print(
+            "Aggregated confusion matrix over all runs "
+            "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:"
+        )
+        print(total_cm)
+        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
+    else:
+        ax_cm.set_title("Aggregated Confusion Matrix")
+        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
+        ax_cm.axis("off")
+
+    #plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
+    for ax in ax_arr:
+        increase_axis_text_size(ax, delta_points=font_size_delta)
+
+    fig.tight_layout()
+    fig.savefig(out_name, dpi=300)
+    print(f"Saved plots to: {out_name}")
+    plt.close(fig)
+    return mean_acc
+
+
+def plot_classical_minus_isovalue_vs_quantum_ev(
+    all_classical_minus_iso_vals,
+    all_quantum_ev_vals,
+    out_name,
+):
+    """
+    Plot style mirrors notebook residual plotting:
+      x-axis: classical weighted subtraction w*x - (1-w)*isovalue
+      y-axis: quantum recovered expectation value (ev)
+    """
+    if not all_classical_minus_iso_vals or not all_quantum_ev_vals:
+        fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
+        ax.set_title("Classical weighted subtraction vs Quantum ev")
+        ax.text(0.5, 0.5, "No tile accuracy data", ha="center", va="center")
+        ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(out_name, dpi=300)
+        print(f"Saved residual plot to: {out_name}")
+        plt.close(fig)
+        return
+
+    classical_vals = np.concatenate(all_classical_minus_iso_vals).astype(float).reshape(-1)
+    quantum_ev_vals = np.concatenate(all_quantum_ev_vals).astype(float).reshape(-1)
+
+    min_val = float(min(np.min(quantum_ev_vals), np.min(classical_vals)))
+    max_val = float(max(np.max(quantum_ev_vals), np.max(classical_vals)))
+    if np.isclose(min_val, max_val):
+        min_val = min_val - 0.05
+        max_val = max_val + 0.05
+
+    fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5))
+    ax.scatter(
+        classical_vals,
+        quantum_ev_vals,
+        color="tab:blue",
+        alpha=0.85,
+        label="Data points",
+    )
+    ax.plot(
+        [min_val, max_val],
+        [min_val, max_val],
+        color="gray",
+        linestyle="--",
+        linewidth=1.2,
+        label="Ideal (y = x)",
+    )
+
+    if quantum_ev_vals.size >= 2 and float(np.std(classical_vals)) > 1e-12:
+        coefficients = np.polyfit(classical_vals, quantum_ev_vals, 1)
+        fit_y = np.poly1d(coefficients)(classical_vals)
+        ax.plot(classical_vals, fit_y, color="red", label="Line of Best Fit")
+        print(f"Slope of line of best fit: {coefficients[0]:.4f}")
+    else:
+        mean_q = float(np.mean(quantum_ev_vals))
+        ax.axhline(
+            mean_q,
+            color="red",
+            linewidth=1.3,
+            label=f"Mean quantum EV ({mean_q:.4f})",
+        )
+        print("Line of best fit skipped (classical values are constant).")
+
+    ax.set_xlabel("Classical weighted subtraction value")
+    ax.set_ylabel("Quantum EV")
+    #ax.set_title("Classical weighted subtraction vs Quantum EV")
+    ax.set_xlim(min_val, max_val)
+    ax.set_ylim(min_val, max_val)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_name, dpi=300)
+    print(
+        "Difference stats "
+        f"(quantum_ev - weighted_subtraction): "
+        f"mean={(quantum_ev_vals - classical_vals).mean():.4f}, "
+        f"min={(quantum_ev_vals - classical_vals).min():.4f}, "
+        f"max={(quantum_ev_vals - classical_vals).max():.4f}"
+    )
+    print(f"Saved residual plot to: {out_name}")
+    plt.close(fig)
+
+
+# -------------------------------- Main --------------------------------
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="QCrank eHANDS classical classification on a tiled image (flat layout)."
+    )
+    parser.add_argument(
+        "--image-path",
+        type=str,
+        default="test_images/Plant_tissue_sections_64x64.png",
+        help="Image file (tiled over region from offset; see --region-*).",
+    )
+    parser.add_argument(
+        "--tile-width",
+        type=int,
+        default=None,
+        help=(
+            "Square tile edge length (pixels). If set together with --tile-height, only that "
+            "size is run instead of the default multi-size tile test. Must equal --tile-height."
+        ),
+    )
+    parser.add_argument(
+        "--tile-height",
+        type=int,
+        default=None,
+        help="Must match --tile-width when either is set (see --tile-width).",
+    )
+    parser.add_argument(
+        "--image-x-offset",
+        type=int,
+        default=0,
+        help="Left edge of crop region.",
+    )
+    parser.add_argument(
+        "--image-y-offset",
+        type=int,
+        default=0,
+        help="Top edge of the tiled region (upper-left corner of region).",
+    )
+    parser.add_argument(
+        "--region-width",
+        type=int,
+        default=None,
+        help="Width of region to cover with tiles (default: to right edge of image).",
+    )
+    parser.add_argument(
+        "--region-height",
+        type=int,
+        default=None,
+        help="Height of region to cover with tiles (default: to bottom edge of image).",
+    )
+    parser.add_argument(
+        "--isovalue-mode",
+        type=str,
+        choices=("auto_median", "fixed"),
+        default="auto_median",
+        help=(
+            "auto_median: median of all pixels in the region (one isovalue for every tile). "
+            "fixed: use --isovalue for every tile."
+        ),
+    )
+    parser.add_argument(
+        "--isovalue",
+        type=float,
+        default=-0.5,
+        help="Isovalue when --isovalue-mode fixed.",
+    )
+    parser.add_argument(
+        "--inside-bias",
+        type=float,
+        default=0.0,
+        help=(
+            "Subtract this from the chosen isovalue (after auto median or fixed). "
+            "Positive values favor class 0 ('inside'). Use 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--save-name",
+        type=str,
+        default=None,
+        help="Path to save the results.",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        choices=("aer", "fake_torino", "fake_marrakesh"),
+        default="aer",
+        help=(
+            "Simulation backend for qiskit_ibm_runtime Sampler: "
+            "aer (AerSimulator), fake_torino, or fake_marrakesh (IBM hardware noise models)."
+        ),
+    )
+    parser.add_argument(
+        "--c-mode",
+        type=str,
+        choices=("1", "2"),
+        default="auto",
+        help=(
+            "Classification method selection mode. "
+            "1: Use base approach."
+            "2: Use iso-weight encoding."
+        ),
+    )
+    args = parser.parse_args()
+
+    default_tile_sizes = (2, 4, 8, 16, 64)
+    iterations = 5
+
+    tw, th = args.tile_width, args.tile_height
+    if tw is not None or th is not None:
+        if tw is None or th is None:
+            parser.error("Use both --tile-width and --tile-height together, or omit both for the default tile test.")
+        if tw != th:
+            parser.error("Non-square tiles are not supported: --tile-width and --tile-height must be equal.")
+        if tw < 1 or th < 1:
+            parser.error("Tile width and height must be positive.")
+        tile_sizes = (tw,)
+    else:
+        tile_sizes = default_tile_sizes
+
+    weight = 0.5
+
+    if args.c_mode == "2":
+        if args.isovalue > 0.5:
+            parser.error("Isovalue must be less than 0.5 for iso-weight encoding.")
+
+    sim = build_sim_backend(args.backend)
+
+    qcrank_ehands_vertex_classification_image_driver(
+        args.isovalue,
+        weight,
+        sim,
+        image_path=args.image_path,
+        tile_width=tw if tw is not None else 4,
+        tile_height=th if th is not None else 4,
+        image_x_offset=args.image_x_offset,
+        image_y_offset=args.image_y_offset,
+        region_width=args.region_width,
+        region_height=args.region_height,
+        isovalue_mode=args.isovalue_mode,
+        inside_bias=args.inside_bias,
+        save_name=args.save_name,
+        tile_sizes=tile_sizes,
+        iterations=iterations,
+        c_mode=args.c_mode,
+    )
 def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile_height, c_mode="1", shots_coef=12):
     stitch_records: list[ClassificationTileStitchRecord] = []
     tile_index = 0
