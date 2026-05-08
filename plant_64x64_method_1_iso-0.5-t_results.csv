@@ -1,4 +1,0 @@
-image_path,shots_coef,shot_scale_2_pow_k,tile_size,iterations,mean_accuracy,avg_preprocess_s,avg_classification_s,avg_postprocess_s,avg_total_s,total_time_5iter_s
-test_images\Plant_tissue_sections_2_64x64.jpg,8,256,8x8,5,0.926318,0.0,44.2,0.0,44.2,221.02
-test_images\Plant_tissue_sections_2_64x64.jpg,10,1024,8x8,5,0.964355,0.0,51.22,0.0,51.22,256.12
-test_images\Plant_tissue_sections_2_64x64.jpg,12,4096,8x8,5,0.982129,0.0,79.41,0.0,79.41,397.05
