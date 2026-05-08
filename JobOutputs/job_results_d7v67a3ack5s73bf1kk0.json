@@ -1,0 +1,26 @@
+{
+    "counts": [
+        {
+            "10": 2419,
+            "0": 2112,
+            "4": 2511,
+            "2": 1630,
+            "8": 2149,
+            "12": 1591,
+            "14": 1959,
+            "6": 2013
+        }
+    ],
+    "total_qubits": 4,
+    "job_info": {
+        "job_id": "d7v67a3ack5s73bf1kk0",
+        "program_id": null,
+        "backend": "ibm_marrakesh",
+        "creation_date": "2026-05-08T15:28:56.086049-07:00",
+        "status": "DONE"
+    },
+    "results": {
+        "results": [],
+        "raw": "PrimitiveResult([SamplerPubResult(data=DataBin(c=BitArray(<shape=(), num_shots=16384, num_bits=4>)), metadata={'circuit_metadata': {}})], metadata={'execution': {'execution_spans': ExecutionSpans([DoubleSliceSpan(<start='2026-05-08 22:30:46', stop='2026-05-08 22:30:51', size=16384>)])}, 'version': 2})"
+    }
+}
