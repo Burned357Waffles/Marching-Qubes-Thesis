@@ -16,13 +16,16 @@ import re
 from dotenv import load_dotenv
 import os
 import time
+import json
+from datetime import datetime
 
 import qiskit
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
-from qiskit_ibm_runtime import SamplerV2 as Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
+from qiskit.transpiler import generate_preset_pass_manager
 
 print(f"Qiskit version: {qiskit.__version__}")
 
@@ -76,6 +79,13 @@ class DataInfo:
         image_y_offset=0,
         image_array=None,
     ):
+        """
+        Build normalized input tensor for QCrank address/data qubits.
+
+        Accepts either an already-normalized grayscale array (`image_array`) or an image file
+        (`image_path`) and produces `data_inp` with shape
+        ``(2**nq_addr, nq_data, n_circuits)`` padded with -1 for unused addresses.
+        """
         self.n_data = image_width * image_height
 
         self.nq_addr = (self.n_data - 1).bit_length()
@@ -103,6 +113,7 @@ class DataInfo:
         self.data_qL = list(range(self.nq_addr, self.nq_addr + self.nq_data))
 
     def normalized_array_to_data(self, arr, image_width, image_height):
+        """Convert a normalized grayscale array into the QCrank `data_inp` format."""
         a = np.asarray(arr, dtype=np.float32)
         if a.shape != (image_height, image_width):
             raise ValueError(
@@ -124,6 +135,14 @@ class DataInfo:
         image_x_offset=0,
         image_y_offset=0,
     ):
+        """
+        Load a grayscale image crop and return it encoded into `data_inp` format.
+
+        The crop is converted to float32 and normalized to [-1, 1]. Values are flattened
+        into the address basis and padded with -1.0 to the next power-of-two length.
+
+        Credit to CursorAI for the following code.
+        """
         image = Image.open(image_path).convert("L")
         if image_x_offset < 0 or image_y_offset < 0:
             raise ValueError("image_x_offset and image_y_offset must be non-negative integers.")
@@ -168,6 +187,7 @@ class EncodedQData:
     __slots__ = ("qc", "qcEL", "nq_addr", "nq_data", "qcrank_obj")
 
     def __init__(self, di, useCZ=False, measure=True, barrier=True, verbose=False):
+        """Create a QCrank circuit and instantiate bound circuits for the given `DataInfo`."""
         self.nq_addr = di.nq_addr
         self.nq_data = di.nq_data
 
@@ -187,6 +207,7 @@ class EncodedQData:
 
 class VertexClassifier:
     def __init__(self, isovalue):
+        """Classifier wrapper that builds circuits and maps recovered EVs to binary classes."""
         self.isovalue = isovalue
         self.classification_threshold = 0.0
         self.di = None
@@ -194,6 +215,7 @@ class VertexClassifier:
         self.qc_main = None
 
     def ehands_addition(self, qc, q_a, q_b, weight, negation=False, verbose=False):
+        """Compose the eHANDS weighted-addition gadget onto `qc` using qubits `q_a`, `q_b`."""
         if not (0.0 <= float(weight) <= 1.0):
             raise ValueError(f"weight must be in range [0, 1], got {weight}")
         alpha = np.arccos(1 - 2 * weight)
@@ -212,6 +234,7 @@ class VertexClassifier:
         return qc.compose(qc_add, qubits=[q_a, q_b])
 
     def add_iso_qubit_for_ehands_add(self, qc, data_q, placement_q, weight, c_mode="1", negation=True, verbose=False):
+        """Prepare an isovalue qubit (mode-dependent) and run the eHANDS addition step."""
         if c_mode == "1":
             qc_iso = QuantumCircuit(1, 1)
             qc_iso.ry(np.arccos(self.isovalue), 0)
@@ -235,6 +258,7 @@ class VertexClassifier:
         image_y_offset=0,
         image_array=None,
     ):
+        """Initialize `DataInfo` from an image file or a pre-normalized tile array."""
         self.di = DataInfo(
             data_range,
             image_path=image_path,
@@ -246,6 +270,7 @@ class VertexClassifier:
         )
 
     def encode_c_classify(self, verbose=False):
+        """Encode the data with QCrank and allocate the main circuit with an iso qubit slot."""
         self.eqd = EncodedQData(self.di, measure=False, verbose=verbose)
 
         total_q = self.di.num_q + 1
@@ -253,11 +278,13 @@ class VertexClassifier:
         self.qc_main.compose(self.eqd.qcEL[0], list(range(self.di.num_q)), inplace=True)
 
     def compose_iso_qubits(self, weight, c_mode="1", verbose=False):
+        """Insert the isovalue qubit preparation and addition gadget into `qc_main`."""
         q_a = self.di.data_qL[0]
         q_b = self.di.num_q
         self.qc_main = self.add_iso_qubit_for_ehands_add(self.qc_main, q_a, q_b, weight, c_mode=c_mode, verbose=verbose)
 
     def add_meas(self):
+        """Add measurement for the data/address register and finalize `EncodedQData` fields."""
         self.qc_main.barrier()
         self.qc_main.measure(list(range(self.di.num_q)), reversed(list(range(self.di.num_q))))
 
@@ -265,6 +292,7 @@ class VertexClassifier:
         self.eqd.qcEL = [self.qc_main]
 
     def recover_data(self, n_shots, countsL, all_data_list, all_rec_list, verbose=False):
+        """Recover expectation values from sampler counts and append to accumulator lists."""
         # ParametricQCrankV2.reco_from_yields prints to stdout; mute unless verbose.
         if verbose:
             data_rec, data_recErr = self.eqd.qcrank_obj.reco_from_yields(countsL)
@@ -283,6 +311,7 @@ class VertexClassifier:
         return all_data_list, all_rec_list, data_rec, data_recErr
 
     def construct_data_lists(self, data_rec, all_data_list, all_rec_list):
+        """Append the latest input and recovered slices into `all_*_list` accumulators."""
         for i in range(self.di.nq_data):
             data_slice = self.di.data_inp[:, i : i + 1, :]
             rec_slice = data_rec[:, i : i + 1, :]
@@ -291,12 +320,14 @@ class VertexClassifier:
         return all_data_list, all_rec_list
 
     def c_classify(self, all_rec_list):
+        """Convert recovered EVs to classes using `classification_threshold` (0/1 labels)."""
         latest = [subl[-1] for subl in all_rec_list]
         rec = np.concatenate(latest, axis=1)
         classifications = np.where(rec[:, 0, 0] >= self.classification_threshold, 0, 1)
         return classifications
 
     def compare_against_input(self, pred_classes, weight):
+        """Compute labels from classical weighted subtraction and compare to predictions."""
         y_pred = np.asarray(pred_classes, dtype=int).reshape(-1)
 
         vals = self.di.data_inp[:, 0, 0]
@@ -328,6 +359,11 @@ class VertexClassifier:
 
 
 def configure_aer_sim():
+    """
+    Create and print an `AerSimulator` configuration for local runs.
+    
+    Credit to CursorAI for the following code.
+    """
     sim = AerSimulator()
     print(sim)
     print(f"\nConfiguration: {sim.configuration()}")
@@ -343,7 +379,11 @@ def configure_aer_sim():
 
 
 def build_sim_backend(backend: str):
-    """Construct simulator backend for ``Sampler(mode=...)``: aer, fake_torino, fake_marrakesh."""
+    """
+    Return a simulation backend instance by name ('aer', 'fake_torino', 'fake_marrakesh').
+    
+    Credit to CursorAI for the following code.
+    """
     key = backend.lower().replace("-", "_")
     if key == "aer":
         return configure_aer_sim()
@@ -363,6 +403,7 @@ def build_sim_backend(backend: str):
 
 
 def configure_qcrank_sampler(sim, n_shots):
+    """Configure a runtime `Sampler` with the given backend and shot count."""
     options = SamplerOptions()
     options.default_shots = n_shots
     sampler = Sampler(mode=sim, options=options)
@@ -370,6 +411,7 @@ def configure_qcrank_sampler(sim, n_shots):
 
 
 def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
+    """Transpile and execute the circuit list with the runtime `Sampler` (simulation mode)."""
     sampler, options = configure_qcrank_sampler(sim, n_shots)
 
     qc_run = tuple(transpile(q, sim) for q in eqd.qcEL)
@@ -390,13 +432,172 @@ def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
     return countsL
 
 
-def _image_region_dimensions(
+def make_json_serializable(obj):
+    """
+    Recursively convert common Python/numpy containers into JSON-serializable objects.
+    
+    Credit to CursorAI for the following code.
+    """
+    if isinstance(obj, dict):
+        return {str(k): make_json_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [make_json_serializable(v) for v in obj]
+    if hasattr(obj, "tolist"):
+        return obj.tolist()
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    return str(obj)
+
+
+def save_job_submission_info(submission_info_dict: dict, *, output_dir: str = "JobOutputs"):
+    """
+    Append a hardware job submission record to `job_submission_info.json`.
+
+    Mirrors Chris's `ehands_qcrank_qsobelV3.py`.
+    
+    Credit to CursorAI for the following code.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    submission_file = os.path.join(output_dir, "job_submission_info.json")
+
+    key = str(submission_info_dict.get("job_id", "")) or datetime.now().isoformat()
+    payload = {key: make_json_serializable(submission_info_dict)}
+
+    if os.path.exists(submission_file):
+        try:
+            with open(submission_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+    else:
+        existing = {}
+
+    if isinstance(existing, dict):
+        existing.update(payload)
+    else:
+        existing = payload
+
+    with open(submission_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+
+    print(f"Job submission info saved to {submission_file}")
+
+
+def build_hardware_backend(*, account_name: str, backend_name: str):
+    """
+    Create a `QiskitRuntimeService` and resolve an IBM backend for hardware runs.
+
+    Mirrors Chris's `ehands_qcrank_qsobelV3.py`.
+    
+    Credit to CursorAI for the following code.
+    """
+    if not account_name:
+        raise ValueError("account_name must be provided for hardware runs.")
+    if not backend_name:
+        raise ValueError("backend_name must be provided for hardware runs.")
+    if "ibm" not in backend_name.lower():
+        raise ValueError("Hardware backend must look like 'ibm_<name>' (for example: ibm_marrakesh).")
+
+    service = QiskitRuntimeService(name=account_name)
+    backend = service.backend(backend_name)
+    return service, backend
+
+
+def run_hardware_job_qcrank(
+    eqd,
+    *,
+    backend,
+    n_shots: int,
+    rc: int = 0,
+    optimization_level: int = 3,
+    seed_transpiler: int | None = None,
+    submit_only: bool = False,
+    verbose: bool = False,
+    submission_context: dict | None = None,
+):
+    """
+    Run the QCrank circuit(s) on IBM hardware via runtime Sampler (optionally submit-only).
+
+    Mirrors Chris's `ehands_qcrank_qsobelV3.py`.
+    
+    Credit to CursorAI for the following code.
+    """
+    if n_shots <= 0:
+        raise ValueError(f"n_shots must be positive, got {n_shots}.")
+
+    options = SamplerOptions()
+    options.default_shots = int(n_shots)
+
+    if rc and int(rc) > 0:
+        options.twirling.enable_gates = True
+        options.twirling.enable_measure = True
+        options.twirling.num_randomizations = int(rc)
+        if verbose:
+            import math as _math
+
+            print(
+                f"RC enabled with rc={rc}; approx shots per randomization: {_math.ceil(n_shots / int(rc))}"
+            )
+
+    # Transpile for the specific device.
+    pm = generate_preset_pass_manager(
+        optimization_level=int(optimization_level),
+        backend=backend,
+        seed_transpiler=seed_transpiler,
+    )
+    qc_run = [pm.run(q) for q in eqd.qcEL]
+
+    sampler = Sampler(mode=backend, options=options)
+    job = sampler.run(qc_run)
+
+    # Save job submission metadata (hardware only).
+    try:
+        gate_count = qc_run[0].count_ops() if qc_run else {}
+        depth = qc_run[0].depth() if qc_run else None
+        two_qb_depth = (
+            qc_run[0].depth(filter_function=lambda x: x.operation.num_qubits > 1) if qc_run else None
+        )
+        width = qc_run[0].num_qubits if qc_run else None
+    except Exception:
+        gate_count, depth, two_qb_depth, width = {}, None, None, None
+
+    submit_info = {
+        "job_id": job.job_id(),
+        "local_submission_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "backend_name": getattr(backend, "name", None) if not callable(getattr(backend, "name", None)) else backend.name(),
+        "total_shots": int(n_shots),
+        "rc": int(rc),
+        "num_circuits": len(qc_run),
+        "hw_opt_level": int(optimization_level),
+        "hw_seed_transpiler": seed_transpiler,
+        "transpiled_gate_count": gate_count,
+        "transpiled_depth": depth,
+        "transpiled_2qb_depth": two_qb_depth,
+        "transpiled_circuit_width": width,
+    }
+    if submission_context:
+        submit_info.update(make_json_serializable(submission_context))
+    save_job_submission_info(submit_info)
+
+    if submit_only:
+        return job.job_id()
+
+    jobRes = job.result()
+    return [jobRes[0].data.c.get_counts()]
+
+
+def image_region_dimensions(
     image_path,
     image_x_offset,
     image_y_offset,
     region_width=None,
     region_height=None,
 ):
+    """
+    Validate and compute the width/height of the requested crop region.
+    
+    Credit to CursorAI for the following code.
+    """
     image = Image.open(image_path)
     max_w = image.width - image_x_offset
     max_h = image.height - image_y_offset
@@ -418,12 +619,14 @@ def _image_region_dimensions(
 
 
 def auto_isovalue_median(normalized_pixels_1d):
+    """Pick an isovalue as the median of normalized pixel values (clipped to [-1, 1])."""
     flat = np.asarray(normalized_pixels_1d, dtype=np.float64).ravel()
     v = float(np.median(flat))
     return float(np.clip(v, -1.0, 1.0))
 
 
 def load_normalized_grayscale_region(image_path, image_x_offset, image_y_offset, width, height):
+    """Load a grayscale crop and normalize to [-1, 1] float32."""
     image = Image.open(image_path).convert("L")
     image = image.crop(
         (
@@ -437,8 +640,12 @@ def load_normalized_grayscale_region(image_path, image_x_offset, image_y_offset,
     return (data / 127.5) - 1.0
 
 
-def _safe_image_stem(image_path: str) -> str:
-    """Filesystem-safe basename without extension for output file naming."""
+def safe_image_stem(image_path: str) -> str:
+    """
+    Create a filesystem-safe stem from an image filename (for output naming).
+    
+    Credit to CursorAI for the following code.
+    """
     base = os.path.basename(image_path)
     stem, _ = os.path.splitext(base)
     stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", stem)
@@ -457,8 +664,9 @@ def classification_output_paths(
     save_name: str,
 ) -> tuple[str, str, str]:
     """
-    Paths under classification_summaries/ and side-by-sides/ with a unique name
-    derived from the source image file, crop offset, region size, and tile size.
+    Return (summary, side-by-side, residual) output file paths and ensure directories exist.
+    
+    Credit to CursorAI for the following code.
     """
     summary_dir = "classification_summaries"
     side_dir = "side-by-sides"
@@ -486,8 +694,6 @@ def classification_output_paths(
 
 
 class QcrankImageTilingPreprocess:
-    """Region, isovalue/method settings, empty canvases and metric accumulators before the tile loop."""
-
     __slots__ = (
         "rw",
         "rh",
@@ -543,6 +749,7 @@ class QcrankImageTilingPreprocess:
         all_quantum_ev_vals,
         datapoint_table_payloads,
     ):
+        """Container for region/tile preprocessing outputs and per-run accumulators."""
         self.rw = rw
         self.rh = rh
         self.n_tx = n_tx
@@ -585,6 +792,8 @@ def prepare_qcrank_ehands_vertex_classification_image(
     """
     Load and normalize the region, choose isovalue, allocate full canvases and per-tile
     accumulator lists. Does not run the quantum tile loop.
+    
+    Credit to CursorAI for the following code.
     """
     print(
         f"inputs (weight: {weight}, tile: {tile_width}x{tile_height}, "
@@ -593,7 +802,7 @@ def prepare_qcrank_ehands_vertex_classification_image(
     if isovalue_mode == "fixed":
         print(f"  fixed isovalue (all tiles): {isovalue}")
 
-    rw, rh = _image_region_dimensions(
+    rw, rh = image_region_dimensions(
         image_path, image_x_offset, image_y_offset, region_width, region_height
     )
     if rw < 1 or rh < 1:
@@ -682,8 +891,6 @@ def prepare_qcrank_ehands_vertex_classification_image(
 
 
 class ClassificationTileStitchRecord(NamedTuple):
-    """One tile's grayscale input and true/pred label grids for canvas stitching."""
-
     ty: int
     tx: int
     padded_tile: np.ndarray
@@ -695,6 +902,8 @@ def stitch_classification_tiles_into_canvases(pre, tile_width, tile_height, reco
     """
     Post-process: write each tile patch into the full-region canvases on ``pre``.
     ``prepare_qcrank_ehands_vertex_classification_image`` must have allocated the arrays.
+    
+    Credit to CursorAI for the following code.
     """
     for rec in records:
         ty0 = rec.ty * tile_height
@@ -715,7 +924,7 @@ def build_classification_plot_context(
     image_y_offset,
     save_name,
 ):
-    """Bundle ``pre`` state and path metadata for plotting (call after stitching)."""
+    """Assemble a plotting context dict from preprocessing outputs and accumulators."""
     return {
         "image_path": image_path,
         "rw": pre.rw,
@@ -764,13 +973,23 @@ def test_shot_count_loop_vertex_classification_image_driver(
     iterations=5,
     shots_coef=(8, 10, 12),
     c_mode="1",
+    run_mode: str = "sim",
+    hw_backend=None,
+    hw_rc: int = 0,
+    hw_opt_level: int = 3,
+    hw_seed_transpiler: int | None = None,
+    hw_submit_only: bool = False,
 ):
+    """Run a shots-coefficient sweep over a tiled image classification experiment.
+
+    Calls the tile-size/iteration driver for each shots exponent and writes a summary CSV.
+    """
     if isinstance(shots_coef, (int, float)):
         shots_coef_iter = (int(shots_coef),)
     else:
         shots_coef_iter = tuple(int(x) for x in shots_coef)
 
-    base_save = save_name if save_name is not None else _safe_image_stem(image_path)
+    base_save = save_name if save_name is not None else safe_image_stem(image_path)
     tile_test_csv_rows: list[dict[str, object]] = []
     last_tile_size_mean_accuracy = 0.0
 
@@ -794,6 +1013,12 @@ def test_shot_count_loop_vertex_classification_image_driver(
             tile_sizes=tile_sizes,
             iterations=iterations,
             c_mode=c_mode,
+            run_mode=run_mode,
+            hw_backend=hw_backend,
+            hw_rc=hw_rc,
+            hw_opt_level=hw_opt_level,
+            hw_seed_transpiler=hw_seed_transpiler,
+            hw_submit_only=hw_submit_only,
         )
         tile_test_csv_rows.extend(rows)
 
@@ -839,10 +1064,21 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
     tile_sizes=(2, 4, 8, 16, 64),
     iterations=5,
     c_mode="1",
+    run_mode: str = "sim",
+    hw_backend=None,
+    hw_rc: int = 0,
+    hw_opt_level: int = 3,
+    hw_seed_transpiler: int | None = None,
+    hw_submit_only: bool = False,
 ):
-    base_save = save_name if save_name is not None else _safe_image_stem(image_path)
+    """Run a tile-size sweep with multiple iterations and emit plots/CSV per configuration."""
+    base_save = save_name if save_name is not None else safe_image_stem(image_path)
     last_tile_size_mean_accuracy = 0.0
     tile_test_csv_rows: list[dict[str, object]] = []
+
+    # Aggregated residual data across the entire tile test (all tile sizes, all iterations).
+    test_classical_minus_iso_vals: list[np.ndarray] = []
+    test_quantum_ev_vals: list[np.ndarray] = []
 
     # Iterate over each tile size
     for tile_sz in tile_sizes:
@@ -854,6 +1090,10 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         total_classification_time = 0.0
         total_postprocess_time = 0.0
         total_mean_accuracy = 0.0
+
+        # Per-tile-size accumulators across all iterations of this tile size.
+        size_classical_minus_iso_vals: list[np.ndarray] = []
+        size_quantum_ev_vals: list[np.ndarray] = []
 
         for i in range(iterations):
             print(f"\nIteration {i + 1}:")
@@ -898,6 +1138,12 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 tile_height=th,
                 c_mode=c_mode,
                 shots_coef=sc,
+                run_mode=run_mode,
+                hw_backend=hw_backend,
+                hw_rc=hw_rc,
+                hw_opt_level=hw_opt_level,
+                hw_seed_transpiler=hw_seed_transpiler,
+                hw_submit_only=hw_submit_only,
             )
 
             classification_end_time = time.time()
@@ -921,7 +1167,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
             ############## PLOT SECTION ##############
             print_datapoint_classification_tables_if_any(pre)
 
-            summary_out, side_by_side_out, residual_out = classification_output_paths(
+            summary_out, side_by_side_out, _ = classification_output_paths(
                 plot_ctx["image_path"],
                 plot_ctx["rw"],
                 plot_ctx["rh"],
@@ -934,7 +1180,6 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
 
             print(f"Saving classification summary to: {summary_out}")
             print(f"Saving side-by-side figure to: {side_by_side_out}")
-            print(f"Saving residual plot to: {residual_out}")
             mean_accuracy = plot_classification_summary_figure(
                 region_width=plot_ctx["rw"],
                 region_height=plot_ctx["rh"],
@@ -963,22 +1208,9 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 input_value_range=input_value_range,
                 region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
             )
-            try:
-                n_classical = sum(np.asarray(a).size for a in plot_ctx["all_classical_minus_iso_vals"])
-                n_quantum = sum(np.asarray(a).size for a in plot_ctx["all_quantum_ev_vals"])
-                print(
-                    f"Residual plot inputs: classical points={n_classical}, "
-                    f"quantum points={n_quantum}, tile chunks={len(plot_ctx['all_classical_minus_iso_vals'])}"
-                )
-                plot_classical_minus_isovalue_vs_quantum_ev(
-                    all_classical_minus_iso_vals=plot_ctx["all_classical_minus_iso_vals"],
-                    all_quantum_ev_vals=plot_ctx["all_quantum_ev_vals"],
-                    out_name=residual_out,
-                )
-            except Exception as exc:
-                import traceback
-                print(f"!!! Residual plot generation failed for {residual_out}: {exc}")
-                traceback.print_exc()
+
+            size_classical_minus_iso_vals.extend(plot_ctx["all_classical_minus_iso_vals"])
+            size_quantum_ev_vals.extend(plot_ctx["all_quantum_ev_vals"])
 
             ############## SUMMARY ##############
 
@@ -1026,6 +1258,35 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
             }
         )
 
+        # Per-tile-size residual plot: aggregates across all iterations for this tile size.
+        size_residual_dir = "residual_plots"
+        os.makedirs(size_residual_dir, exist_ok=True)
+        size_residual_out = (
+            f"{size_residual_dir}/{base_save}_sc{sc}_{tw}x{th}"
+            f"_classical_minus_isovalue_vs_quantum_ev.png"
+        )
+        try:
+            n_classical = sum(np.asarray(a).size for a in size_classical_minus_iso_vals)
+            n_quantum = sum(np.asarray(a).size for a in size_quantum_ev_vals)
+            print(
+                f"\n[k={sc}] Tile {tw}x{th} aggregated residual plot inputs: "
+                f"classical points={n_classical}, quantum points={n_quantum}, "
+                f"chunks={len(size_classical_minus_iso_vals)} (over {n} iterations)"
+            )
+            plot_classical_minus_isovalue_vs_quantum_ev(
+                all_classical_minus_iso_vals=size_classical_minus_iso_vals,
+                all_quantum_ev_vals=size_quantum_ev_vals,
+                out_name=size_residual_out,
+            )
+        except Exception as exc:
+            import traceback
+            print(f"!!! Residual plot generation failed for {size_residual_out}: {exc}")
+            traceback.print_exc()
+
+        # Roll this tile size's data into the test-level accumulators.
+        test_classical_minus_iso_vals.extend(size_classical_minus_iso_vals)
+        test_quantum_ev_vals.extend(size_quantum_ev_vals)
+
     # Write tile-test summary CSV (matches plant_*_results.csv reference format).
     results_path = f"{base_save}_sc{sc}_results.csv"
     fieldnames = [
@@ -1044,6 +1305,32 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         writer.writeheader()
         writer.writerows(tile_test_csv_rows)
     print(f"\nWrote per-tile-size summary to: {results_path}")
+
+    # Aggregated tile-test residual plot covering every tile size and iteration in this run.
+    test_residual_dir = "residual_plots"
+    os.makedirs(test_residual_dir, exist_ok=True)
+    test_residual_out = (
+        f"{test_residual_dir}/{base_save}_sc{sc}_tile-test"
+        f"_classical_minus_isovalue_vs_quantum_ev.png"
+    )
+    try:
+        n_classical = sum(np.asarray(a).size for a in test_classical_minus_iso_vals)
+        n_quantum = sum(np.asarray(a).size for a in test_quantum_ev_vals)
+        print(
+            f"\nTile-test aggregated residual plot inputs: "
+            f"classical points={n_classical}, quantum points={n_quantum}, "
+            f"chunks={len(test_classical_minus_iso_vals)} "
+            f"(over {len(tile_sizes)} tile sizes x {iterations} iterations)"
+        )
+        plot_classical_minus_isovalue_vs_quantum_ev(
+            all_classical_minus_iso_vals=test_classical_minus_iso_vals,
+            all_quantum_ev_vals=test_quantum_ev_vals,
+            out_name=test_residual_out,
+        )
+    except Exception as exc:
+        import traceback
+        print(f"!!! Tile-test residual plot generation failed for {test_residual_out}: {exc}")
+        traceback.print_exc()
 
     return last_tile_size_mean_accuracy, tile_test_csv_rows
 
@@ -1067,8 +1354,18 @@ def qcrank_ehands_vertex_classification_image_driver(
     iterations=5,
     shots_coef=(8, 10, 12),
     c_mode="1",
+    run_mode: str = "sim",
+    hw_backend=None,
+    hw_rc: int = 0,
+    hw_opt_level: int = 3,
+    hw_seed_transpiler: int | None = None,
+    hw_submit_only: bool = False,
 ):
-    # Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
+    """
+    Top-level driver for the tiled image classification experiment (dispatches to tests).
+    
+    Thanks to CursorAI for the reorganization of the code to add timers and separate sections.
+    """
     print("RUNNING TEST: CLASSICAL CLASSIFICATION ON IMAGE (TILED)")
     if isinstance(shots_coef, (int, float)):
         shots_coef_iter = (int(shots_coef),)
@@ -1097,9 +1394,31 @@ def qcrank_ehands_vertex_classification_image_driver(
         iterations=iterations,
         shots_coef=shots_coef,
         c_mode=c_mode,
+        run_mode=run_mode,
+        hw_backend=hw_backend,
+        hw_rc=hw_rc,
+        hw_opt_level=hw_opt_level,
+        hw_seed_transpiler=hw_seed_transpiler,
+        hw_submit_only=hw_submit_only,
     )
 
-def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile_height, c_mode="1", shots_coef=12):
+def qcrank_ehands_vertex_classification_image(
+    pre,
+    weight,
+    sim,
+    tile_width,
+    tile_height,
+    c_mode="1",
+    shots_coef=12,
+    *,
+    run_mode: str = "sim",
+    hw_backend=None,
+    hw_rc: int = 0,
+    hw_opt_level: int = 3,
+    hw_seed_transpiler: int | None = None,
+    hw_submit_only: bool = False,
+):
+    """Run the quantum tile loop: build per-tile circuits, sample, recover EVs, classify, and accumulate."""
     stitch_records: list[ClassificationTileStitchRecord] = []
     tile_index = 0
     for ty in range(pre.n_ty):
@@ -1134,7 +1453,35 @@ def qcrank_ehands_vertex_classification_image(pre, weight, sim, tile_width, tile
             vc.add_meas()
 
             n_shots = vc.di.n_data * (2**shots_coef)
-            countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+            if run_mode == "hardware":
+                if hw_backend is None:
+                    raise ValueError("hw_backend must be provided when run_mode='hardware'.")
+                job_or_counts = run_hardware_job_qcrank(
+                    vc.eqd,
+                    backend=hw_backend,
+                    n_shots=n_shots,
+                    rc=hw_rc,
+                    optimization_level=hw_opt_level,
+                    seed_transpiler=hw_seed_transpiler,
+                    submit_only=hw_submit_only,
+                    verbose=verbose,
+                    submission_context={
+                        "tile_index": int(tile_index),
+                        "tile_tx": int(tx),
+                        "tile_ty": int(ty),
+                        "tile_width": int(tile_width),
+                        "tile_height": int(tile_height),
+                        "shots_coef_k": int(shots_coef),
+                        "classification_mode": str(c_mode),
+                    },
+                )
+                if hw_submit_only:
+                    # Print-and-exit behavior: submit first tile then stop the run.
+                    print(f"Submitted hardware job id: {job_or_counts}")
+                    raise SystemExit(0)
+                countsL = job_or_counts
+            else:
+                countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
 
             vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose)
 
@@ -1219,6 +1566,11 @@ def plot_full_image_vs_classification(
     input_value_range=(-1.0, 1.0),
     region_size_hw=None,
 ):
+    """
+    Plot input grayscale, true classes, and predicted classes side-by-side to `out_name`.
+    
+    Credit to CursorAI for the following code.
+    """
     font_size_delta = 5
     input_image = np.asarray(input_image, dtype=np.float32)
     true_image = np.asarray(true_image, dtype=np.int32)
@@ -1323,14 +1675,22 @@ def plot_full_image_vs_classification(
     plt.close(fig)
 
 def axis_ticks(n, step=10):
-    """Pixel-axis tick positions; labels only at multiples of `step` (no extra edge tick)."""
+    """
+    Compute simple integer tick marks for an axis of length `n`.
+    
+    Credit to CursorAI for the following code.
+    """
     if n <= 0:
         return np.array([], dtype=int)
     return np.asarray(list(range(0, n, step)), dtype=int)
 
 
 def increase_axis_text_size(ax, delta_points=5):
-    """Increase axis/legend/tick/text sizes by a fixed point delta."""
+    """
+    Increase title/label/tick/legend font sizes for a matplotlib axis.
+    
+    Credit to CursorAI for the following code.
+    """
     ax.title.set_fontsize(ax.title.get_fontsize() + delta_points)
     ax.xaxis.label.set_fontsize(ax.xaxis.label.get_fontsize() + delta_points)
     ax.yaxis.label.set_fontsize(ax.yaxis.label.get_fontsize() + delta_points)
@@ -1350,6 +1710,11 @@ def increase_axis_text_size(ax, delta_points=5):
         text.set_fontsize(text.get_fontsize() + delta_points)
 
 def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
+    """
+    Plot histograms of weighted subtraction values for correct vs incorrect predictions.
+    
+    Credit to CursorAI for the following code.
+    """
     if ax is None:
         ax = plt.gca()
 
@@ -1381,7 +1746,11 @@ def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals,
 
 
 def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
-    """Diagonal = correct (Blues, scaled within diagonal); off-diagonal = error (Oranges, scaled within errors)."""
+    """
+    Render an aggregated 2x2 confusion matrix with color-coded diagonal/off-diagonal.
+    
+    Credit to CursorAI for the following code.
+    """
     if ax is None:
         ax = plt.gca()
 
@@ -1430,6 +1799,11 @@ def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matri
 
 
 def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
+    """
+    Plot total predicted class counts (class 0 vs 1).
+    
+    Credit to CursorAI for the following code.
+    """
     if ax is None:
         ax = plt.gca()
 
@@ -1442,6 +1816,11 @@ def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
 
 
 def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals, bins=20, ax=None):
+    """
+    Plot histogram of true-class weighted subtraction values (classical baseline).
+    
+    Credit to CursorAI for the following code.
+    """
     if ax is None:
         ax = plt.gca()
 
@@ -1469,6 +1848,11 @@ def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals,
 
 
 def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
+    """
+    Print a per-datapoint ASCII table and return (correct_vals, incorrect_vals) arrays.
+    
+    Credit to CursorAI for the following code.
+    """
     y_true = np.asarray(y_true).reshape(-1)
     y_pred = np.asarray(y_pred).reshape(-1)
     data_vals = np.asarray(data_vals).reshape(-1)
@@ -1510,12 +1894,21 @@ def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true
 
 
 def print_datapoint_classification_tables_if_any(pre):
-    """Deferred per-datapoint ASCII tables (after classification; first tile only when n_data <= 64)."""
+    """
+    Print any captured per-datapoint tables stored on `pre` (typically first tile only).
+    
+    Credit to CursorAI for the following code.
+    """
     for payload in pre.datapoint_table_payloads:
         print_per_datapoint_classification_table(**payload)
 
 
 def plot_classification_summary_figure(region_width, region_height, tile_width, tile_height, acc_list, cm_list, agg_counts, all_correct_vals, all_incorrect_vals, all_true_inside_vals, all_true_outside_vals, out_name, bins=20):
+    """
+    Create and save the 3-panel summary figure (histograms + aggregated confusion matrix).
+    
+    Credit to CursorAI for the following code.
+    """
     font_size_delta = 5
     mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
     title = f"Mean accuracy over {region_width}x{region_height} region, with {len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
@@ -1571,9 +1964,9 @@ def plot_classical_minus_isovalue_vs_quantum_ev(
     out_name,
 ):
     """
-    Plot style mirrors notebook residual plotting:
-      x-axis: classical weighted subtraction w*x - (1-w)*isovalue
-      y-axis: quantum recovered expectation value (ev)
+    Plot classical weighted subtraction vs recovered quantum EV with optional best-fit line.
+    
+    Credit to CursorAI for the following code.
     """
     if not all_classical_minus_iso_vals or not all_quantum_ev_vals:
         fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
@@ -1673,6 +2066,12 @@ if __name__ == "__main__":
         help="Shots exponent k used when --test tile (n_shots = n_data * 2**k per tile).",
     )
     parser.add_argument(
+        "--iterations",
+        type=int,
+        default=5,
+        help="Number of iterations to run for each tile size.",
+    )
+    parser.add_argument(
         "--image-path",
         type=str,
         default="test_images/Plant_tissue_sections_64x64.png",
@@ -1759,6 +2158,65 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--run-mode",
+        type=str,
+        choices=("sim", "hardware"),
+        default="sim",
+        help=(
+            "Execution target. "
+            "sim: run via Aer/Fake backends (uses --backend). "
+            "hardware: run on an IBM QPU (uses --ibm-backend and --account-name)."
+        ),
+    )
+    parser.add_argument(
+        "--ibm-backend",
+        type=str,
+        default=None,
+        help=(
+            "IBM backend name for --run-mode hardware (example: ibm_marrakesh). "
+            "Must contain 'ibm'."
+        ),
+    )
+    parser.add_argument(
+        "--account-name",
+        type=str,
+        default="",
+        help=(
+            "QiskitRuntimeService account name (as configured in your local IBM Runtime setup). "
+            "Required for --run-mode hardware."
+        ),
+    )
+    parser.add_argument(
+        "--rc",
+        type=int,
+        default=0,
+        help=(
+            "Pauli twirling/randomized compilation count for --run-mode hardware. "
+            "0 disables; >0 enables twirling in Sampler options."
+        ),
+    )
+    parser.add_argument(
+        "--hw-opt-level",
+        type=int,
+        choices=(0, 1, 2, 3),
+        default=3,
+        help="Transpiler optimization level for --run-mode hardware.",
+    )
+    parser.add_argument(
+        "--hw-seed-transpiler",
+        type=int,
+        default=None,
+        help="Optional transpiler seed for --run-mode hardware.",
+    )
+    parser.add_argument(
+        "--hw-submit-only",
+        action="store_true",
+        help=(
+            "For --run-mode hardware: submit the job and exit after printing the job id "
+            "(does not wait for results / does not generate plots)."
+        ),
+    )
+    parser.add_argument(
         "--c-mode",
         type=str,
         choices=("1", "2"),
@@ -1773,7 +2231,7 @@ if __name__ == "__main__":
 
     #default_tile_sizes = (2, 4, 8, 16, 64)
     default_tile_sizes = (2, 4, 8, 16)
-    iterations = 5
+    iterations = args.iterations
 
     tw, th = args.tile_width, args.tile_height
     if tw is not None or th is not None:
@@ -1791,7 +2249,18 @@ if __name__ == "__main__":
         if args.isovalue > 0.5:
             parser.error("Isovalue must be less than 0.5 for iso-weight encoding.")
 
-    sim = build_sim_backend(args.backend)
+    sim = None
+    hw_backend = None
+    if args.run_mode == "sim":
+        sim = build_sim_backend(args.backend)
+    else:
+        if not args.ibm_backend:
+            parser.error("--ibm-backend is required when --run-mode hardware.")
+        if not args.account_name:
+            parser.error("--account-name is required when --run-mode hardware.")
+        _, hw_backend = build_hardware_backend(
+            account_name=args.account_name, backend_name=args.ibm_backend
+        )
 
     common_kwargs = dict(
         isovalue=args.isovalue,
@@ -1810,6 +2279,12 @@ if __name__ == "__main__":
         tile_sizes=tile_sizes,
         iterations=iterations,
         c_mode=args.c_mode,
+        run_mode=args.run_mode,
+        hw_backend=hw_backend,
+        hw_rc=int(args.rc),
+        hw_opt_level=int(args.hw_opt_level),
+        hw_seed_transpiler=args.hw_seed_transpiler,
+        hw_submit_only=bool(args.hw_submit_only),
     )
 
     if args.test == "full":
