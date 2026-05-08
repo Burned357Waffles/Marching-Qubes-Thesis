@@ -1,0 +1,30 @@
+{
+  "d7v67a3ack5s73bf1kk0": {
+    "job_id": "d7v67a3ack5s73bf1kk0",
+    "local_submission_time": "2026-05-08 15:28:56",
+    "backend_name": "ibm_marrakesh",
+    "total_shots": 16384,
+    "rc": 0,
+    "num_circuits": 1,
+    "hw_opt_level": 3,
+    "hw_seed_transpiler": null,
+    "transpiled_gate_count": {
+      "rz": 18,
+      "sx": 18,
+      "cz": 6,
+      "barrier": 4,
+      "measure": 3,
+      "x": 1
+    },
+    "transpiled_depth": 35,
+    "transpiled_2qb_depth": 10,
+    "transpiled_circuit_width": 156,
+    "tile_index": 0,
+    "tile_tx": 0,
+    "tile_ty": 0,
+    "tile_width": 2,
+    "tile_height": 2,
+    "shots_coef_k": 12,
+    "classification_mode": "1"
+  }
+}
