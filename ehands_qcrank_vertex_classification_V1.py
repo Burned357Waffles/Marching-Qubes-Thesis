@@ -432,6 +432,15 @@ def run_sim_job_qcrank(eqd, sim, n_shots=2**12, verbose=False):
     return countsL
 
 
+def run_sim_job_qcrank_batch(circuits, sim, n_shots, verbose=False):
+    """Transpile and execute a flat list of circuits in a single Sampler job (simulation)."""
+    sampler, options = configure_qcrank_sampler(sim, n_shots)
+    qc_run = tuple(transpile(q, sim) for q in circuits)
+    job = sampler.run(qc_run)
+    jobRes = job.result()
+    return [jobRes[i].data.c.get_counts() for i in range(len(circuits))]
+
+
 def make_json_serializable(obj):
     """
     Recursively convert common Python/numpy containers into JSON-serializable objects.
@@ -503,8 +512,8 @@ def build_hardware_backend(*, account_name: str, backend_name: str):
     return service, backend
 
 
-def run_hardware_job_qcrank(
-    eqd,
+def run_hardware_job_qcrank_batch(
+    circuits,
     *,
     backend,
     n_shots: int,
@@ -516,11 +525,9 @@ def run_hardware_job_qcrank(
     submission_context: dict | None = None,
 ):
     """
-    Run the QCrank circuit(s) on IBM hardware via runtime Sampler (optionally submit-only).
+    Transpile and submit a flat list of circuits in a single Sampler job on IBM hardware.
 
-    Mirrors Chris's `ehands_qcrank_qsobelV3.py`.
-    
-    Credit to CursorAI for the following code.
+    Returns a list of count dicts (one per circuit) or a job ID string if submit_only.
     """
     if n_shots <= 0:
         raise ValueError(f"n_shots must be positive, got {n_shots}.")
@@ -532,30 +539,24 @@ def run_hardware_job_qcrank(
         options.twirling.enable_gates = True
         options.twirling.enable_measure = True
         options.twirling.num_randomizations = int(rc)
-        if verbose:
-            import math as _math
 
-            print(
-                f"RC enabled with rc={rc}; approx shots per randomization: {_math.ceil(n_shots / int(rc))}"
-            )
-
-    # Transpile for the specific device.
     pm = generate_preset_pass_manager(
         optimization_level=int(optimization_level),
         backend=backend,
         seed_transpiler=seed_transpiler,
     )
-    qc_run = [pm.run(q) for q in eqd.qcEL]
+    qc_run = [pm.run(q) for q in circuits]
 
     sampler = Sampler(mode=backend, options=options)
     job = sampler.run(qc_run)
 
-    # Save job submission metadata (hardware only).
     try:
         gate_count = qc_run[0].count_ops() if qc_run else {}
         depth = qc_run[0].depth() if qc_run else None
         two_qb_depth = (
-            qc_run[0].depth(filter_function=lambda x: x.operation.num_qubits > 1) if qc_run else None
+            qc_run[0].depth(filter_function=lambda x: x.operation.num_qubits > 1)
+            if qc_run
+            else None
         )
         width = qc_run[0].num_qubits if qc_run else None
     except Exception:
@@ -564,7 +565,11 @@ def run_hardware_job_qcrank(
     submit_info = {
         "job_id": job.job_id(),
         "local_submission_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "backend_name": getattr(backend, "name", None) if not callable(getattr(backend, "name", None)) else backend.name(),
+        "backend_name": (
+            getattr(backend, "name", None)
+            if not callable(getattr(backend, "name", None))
+            else backend.name()
+        ),
         "total_shots": int(n_shots),
         "rc": int(rc),
         "num_circuits": len(qc_run),
@@ -583,7 +588,7 @@ def run_hardware_job_qcrank(
         return job.job_id()
 
     jobRes = job.result()
-    return [jobRes[0].data.c.get_counts()]
+    return [jobRes[i].data.c.get_counts() for i in range(len(circuits))]
 
 
 def image_region_dimensions(
@@ -1075,6 +1080,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
     base_save = save_name if save_name is not None else safe_image_stem(image_path)
     last_tile_size_mean_accuracy = 0.0
     tile_test_csv_rows: list[dict[str, object]] = []
+    submitted_job_ids: list[str] = []
 
     # Aggregated residual data across the entire tile test (all tile sizes, all iterations).
     test_classical_minus_iso_vals: list[np.ndarray] = []
@@ -1130,7 +1136,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
 
             ############## CLASSIFICATION SECTION ##############
             classification_start_time = time.time()
-            all_rec_list, all_data_list, pre, stitch_records = qcrank_ehands_vertex_classification_image(
+            classification_result = qcrank_ehands_vertex_classification_image(
                 pre,
                 weight,
                 sim,
@@ -1145,6 +1151,12 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 hw_seed_transpiler=hw_seed_transpiler,
                 hw_submit_only=hw_submit_only,
             )
+
+            if isinstance(classification_result, str):
+                submitted_job_ids.append(classification_result)
+                continue
+
+            all_rec_list, all_data_list, pre, stitch_records = classification_result
 
             classification_end_time = time.time()
             classification_time = classification_end_time - classification_start_time
@@ -1225,6 +1237,9 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
             print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
             print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
 
+        if hw_submit_only:
+            continue
+
         n = iterations
         average_mean_accuracy = total_mean_accuracy / n
         average_preprocess_time = total_preprocess_time / n
@@ -1286,6 +1301,12 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         # Roll this tile size's data into the test-level accumulators.
         test_classical_minus_iso_vals.extend(size_classical_minus_iso_vals)
         test_quantum_ev_vals.extend(size_quantum_ev_vals)
+
+    if submitted_job_ids:
+        print(f"\nAll hardware jobs submitted ({len(submitted_job_ids)} total):")
+        for jid in submitted_job_ids:
+            print(f"  {jid}")
+        raise SystemExit(0)
 
     # Write tile-test summary CSV (matches plant_*_results.csv reference format).
     results_path = f"{base_save}_sc{sc}_results.csv"
@@ -1418,14 +1439,19 @@ def qcrank_ehands_vertex_classification_image(
     hw_seed_transpiler: int | None = None,
     hw_submit_only: bool = False,
 ):
-    """Run the quantum tile loop: build per-tile circuits, sample, recover EVs, classify, and accumulate."""
+    """
+    Build all per-tile circuits, submit them as a single batch job, then recover EVs, classify, and accumulate.
+    
+    Credit to CursorAI for helping with the batch job submission.
+    """
     stitch_records: list[ClassificationTileStitchRecord] = []
-    tile_index = 0
+
+    # Phase 1: Build all tile circuits without submitting any jobs
+    tile_build_data: list[tuple[VertexClassifier, np.ndarray, int, int]] = []
+    all_circuits: list[QuantumCircuit] = []
+
     for ty in range(pre.n_ty):
         for tx in range(pre.n_tx):
-            #verbose = tile_index == 0
-            verbose = False
-
             x0 = tx * tile_width
             y0 = ty * tile_height
             x1 = min(x0 + tile_width, pre.rw)
@@ -1448,108 +1474,112 @@ def qcrank_ehands_vertex_classification_image(
             vc.isovalue = pre.image_isovalue_proc
             vc.classification_threshold = pre.class_threshold
 
-            vc.encode_c_classify(verbose)
-            vc.compose_iso_qubits(pre.compose_weight, c_mode=c_mode, verbose=verbose)
+            vc.encode_c_classify(verbose=False)
+            vc.compose_iso_qubits(pre.compose_weight, c_mode=c_mode, verbose=False)
             vc.add_meas()
 
-            n_shots = vc.di.n_data * (2**shots_coef)
-            if run_mode == "hardware":
-                if hw_backend is None:
-                    raise ValueError("hw_backend must be provided when run_mode='hardware'.")
-                job_or_counts = run_hardware_job_qcrank(
-                    vc.eqd,
-                    backend=hw_backend,
-                    n_shots=n_shots,
-                    rc=hw_rc,
-                    optimization_level=hw_opt_level,
-                    seed_transpiler=hw_seed_transpiler,
-                    submit_only=hw_submit_only,
-                    verbose=verbose,
-                    submission_context={
-                        "tile_index": int(tile_index),
-                        "tile_tx": int(tx),
-                        "tile_ty": int(ty),
-                        "tile_width": int(tile_width),
-                        "tile_height": int(tile_height),
-                        "shots_coef_k": int(shots_coef),
-                        "classification_mode": str(c_mode),
-                    },
-                )
-                if hw_submit_only:
-                    # Print-and-exit behavior: submit first tile then stop the run.
-                    print(f"Submitted hardware job id: {job_or_counts}")
-                    raise SystemExit(0)
-                countsL = job_or_counts
-            else:
-                countsL = run_sim_job_qcrank(vc.eqd, sim, n_shots, verbose)
+            all_circuits.extend(vc.eqd.qcEL)
+            tile_build_data.append((vc, padded_tile, ty, tx))
 
-            vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose)
+    print(f"Total circuits in batch: {len(all_circuits)}")
 
-            classifications = vc.c_classify(pre.all_rec_list)
-            comp = vc.compare_against_input(classifications, weight)
+    # Phase 2: Submit all circuits as a single batch job
+    n_shots = tile_build_data[0][0].di.n_data * (2**shots_coef)
 
-            pre.cm_list.append(comp["confusion_matrix"])
-            pre.acc_list.append(comp["accuracy"])
+    if run_mode == "hardware":
+        if hw_backend is None:
+            raise ValueError("hw_backend must be provided when run_mode='hardware'.")
+        result = run_hardware_job_qcrank_batch(
+            all_circuits,
+            backend=hw_backend,
+            n_shots=n_shots,
+            rc=hw_rc,
+            optimization_level=hw_opt_level,
+            seed_transpiler=hw_seed_transpiler,
+            submit_only=hw_submit_only,
+            submission_context={
+                "n_tiles": len(tile_build_data),
+                "tile_width": int(tile_width),
+                "tile_height": int(tile_height),
+                "shots_coef_k": int(shots_coef),
+                "classification_mode": str(c_mode),
+            },
+        )
+        if hw_submit_only:
+            print(f"Submitted hardware job id: {result}")
+            return result
+        all_counts = result
+    else:
+        all_counts = run_sim_job_qcrank_batch(all_circuits, sim, n_shots)
 
-            data_vals = vc.di.data_inp[:, 0, 0]
-            quantum_ev_vals = np.asarray(pre.all_rec_list[0][-1])[:, 0, 0]
-            subtraction_vals = (
-                pre.compose_weight * data_vals - (1.0 - pre.compose_weight) * vc.isovalue
+    # Phase 3: Process results per-tile
+    for tile_index, (vc, padded_tile, ty, tx) in enumerate(tile_build_data):
+        countsL = [all_counts[tile_index]]
+
+        vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose=False)
+
+        classifications = vc.c_classify(pre.all_rec_list)
+        comp = vc.compare_against_input(classifications, weight)
+
+        pre.cm_list.append(comp["confusion_matrix"])
+        pre.acc_list.append(comp["accuracy"])
+
+        data_vals = vc.di.data_inp[:, 0, 0]
+        quantum_ev_vals = np.asarray(pre.all_rec_list[0][-1])[:, 0, 0]
+        subtraction_vals = (
+            pre.compose_weight * data_vals - (1.0 - pre.compose_weight) * vc.isovalue
+        )
+
+        pre.all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
+        pre.all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
+
+        y_t = np.asarray(comp["y_true"]).reshape(-1)
+        y_p = np.asarray(comp["y_pred"]).reshape(-1)
+        sub = np.asarray(subtraction_vals).reshape(-1)
+        correct_mask = y_t == y_p
+        incorrect_mask = ~correct_mask
+        true_inside_mask = y_t == 0
+        true_outside_mask = y_t == 1
+
+        if np.any(true_inside_mask):
+            pre.all_true_inside_vals.append(sub[true_inside_mask])
+        if np.any(true_outside_mask):
+            pre.all_true_outside_vals.append(sub[true_outside_mask])
+
+        if np.any(correct_mask):
+            pre.all_correct_vals.append(sub[correct_mask])
+        if np.any(incorrect_mask):
+            pre.all_incorrect_vals.append(sub[incorrect_mask])
+
+        if tile_index == 0 and vc.di.n_data <= 64:
+            pre.datapoint_table_payloads.append(
+                {
+                    "data_vals": np.asarray(data_vals, dtype=np.float32).copy(),
+                    "subtraction_vals": np.asarray(subtraction_vals, dtype=np.float32).copy(),
+                    "y_true": np.asarray(comp["y_true"]).copy(),
+                    "y_pred": np.asarray(comp["y_pred"]).copy(),
+                }
             )
 
-            pre.all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
-            pre.all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
+        pre.agg_counts["0"] += int(np.sum(classifications == 0))
+        pre.agg_counts["1"] += int(np.sum(classifications == 1))
 
-            y_t = np.asarray(comp["y_true"]).reshape(-1)
-            y_p = np.asarray(comp["y_pred"]).reshape(-1)
-            sub = np.asarray(subtraction_vals).reshape(-1)
-            correct_mask = y_t == y_p
-            incorrect_mask = ~correct_mask
-            true_inside_mask = y_t == 0
-            true_outside_mask = y_t == 1
-
-            if np.any(true_inside_mask):
-                pre.all_true_inside_vals.append(sub[true_inside_mask])
-            if np.any(true_outside_mask):
-                pre.all_true_outside_vals.append(sub[true_outside_mask])
-
-            if np.any(correct_mask):
-                pre.all_correct_vals.append(sub[correct_mask])
-            if np.any(incorrect_mask):
-                pre.all_incorrect_vals.append(sub[incorrect_mask])
-
-            # One ASCII table (first tile only) when the circuit is small enough to read.
-            if tile_index == 0 and vc.di.n_data <= 64:
-                pre.datapoint_table_payloads.append(
-                    {
-                        "data_vals": np.asarray(data_vals, dtype=np.float32).copy(),
-                        "subtraction_vals": np.asarray(subtraction_vals, dtype=np.float32).copy(),
-                        "y_true": np.asarray(comp["y_true"]).copy(),
-                        "y_pred": np.asarray(comp["y_pred"]).copy(),
-                    }
-                )
-
-            pre.agg_counts["0"] += int(np.sum(classifications == 0))
-            pre.agg_counts["1"] += int(np.sum(classifications == 1))
-
-            n_pix = tile_width * tile_height
-            true_tile = (
-                np.asarray(comp["y_true"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+        n_pix = tile_width * tile_height
+        true_tile = (
+            np.asarray(comp["y_true"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+        )
+        pred_tile = (
+            np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
+        )
+        stitch_records.append(
+            ClassificationTileStitchRecord(
+                ty=ty,
+                tx=tx,
+                padded_tile=padded_tile,
+                true_tile=true_tile,
+                pred_tile=pred_tile,
             )
-            pred_tile = (
-                np.asarray(comp["y_pred"], dtype=int).reshape(-1)[:n_pix].reshape(tile_height, tile_width)
-            )
-            stitch_records.append(
-                ClassificationTileStitchRecord(
-                    ty=ty,
-                    tx=tx,
-                    padded_tile=padded_tile,
-                    true_tile=true_tile,
-                    pred_tile=pred_tile,
-                )
-            )
-
-            tile_index += 1
+        )
 
     return pre.all_rec_list, pre.all_data_list, pre, stitch_records
 
