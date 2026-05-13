@@ -591,6 +591,154 @@ def run_hardware_job_qcrank_batch(
     return [jobRes[i].data.c.get_counts() for i in range(len(circuits))]
 
 
+def _decompress_count_keys(compressed_counts, total_qubits):
+    """Reverse the compression applied by ``retrieve_save_results.ipynb``.
+
+    The notebook's ``compress_count_keys`` reverses the Qiskit bitstring
+    before converting to an integer.  This function inverts that process to
+    recover the original bitstring-keyed counts dict.
+    """
+    decompressed: dict[str, int] = {}
+    for key, value in compressed_counts.items():
+        bin_key = bin(int(key))[2:].zfill(total_qubits)
+        bin_key = bin_key[::-1]
+        decompressed[bin_key] = value
+    return decompressed
+
+
+_DOUBLE_SLICE_SPAN_RE = re.compile(
+    r"DoubleSliceSpan\(\s*<start='([^']+)',\s*stop='([^']+)',"
+)
+
+
+def _parse_double_slice_span_total_seconds(result_data: dict) -> float | None:
+    """
+    Sum (stop - start) over all ``DoubleSliceSpan`` entries embedded in
+    ``result_data['results']['raw']`` (as saved by the retrieval notebook).
+
+    Returns None if the raw string is missing or no spans match.
+
+    Credit to CursorAI for the following code.
+    """
+    raw = None
+    results_block = result_data.get("results")
+    if isinstance(results_block, dict):
+        raw = results_block.get("raw")
+    if not raw or not isinstance(raw, str):
+        return None
+    spans = _DOUBLE_SLICE_SPAN_RE.findall(raw)
+    if not spans:
+        return None
+    total = 0.0
+    for start_s, stop_s in spans:
+        try:
+            t0 = datetime.strptime(start_s.strip(), "%Y-%m-%d %H:%M:%S")
+            t1 = datetime.strptime(stop_s.strip(), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+        total += (t1 - t0).total_seconds()
+    return total
+
+
+def load_hw_results_from_dir(results_dir):
+    """
+    Load hardware job results from a directory of ``job_results_*.json`` files.
+
+    Cross-references ``job_submission_info.json`` (looked up in the parent
+    directory first, then in *results_dir* itself) to obtain per-job tile
+    metadata.
+
+    Returns ``{tile_width: {"counts": [...], "n_shots": int, "shots_coef_k": int,
+    "c_mode": str, "job_id": str, "n_tiles": int,
+    "execution_s": float | None}}`` keyed by square tile edge length.
+    ``execution_s`` is the sum of ``DoubleSliceSpan`` durations from the job JSON
+    (IBM-reported execution window), or None if not parseable.
+
+    Credit to CursorAI for the following code.
+    """
+    results_dir = os.path.normpath(results_dir)
+
+    submission_info = {}
+    for candidate in [
+        os.path.join(os.path.dirname(results_dir), "job_submission_info.json"),
+        os.path.join(results_dir, "job_submission_info.json"),
+    ]:
+        if os.path.isfile(candidate):
+            with open(candidate, "r", encoding="utf-8") as f:
+                submission_info = json.load(f)
+            print(f"Loaded submission info from {candidate}")
+            break
+    if not submission_info:
+        raise FileNotFoundError(
+            "Could not find job_submission_info.json in the parent or results directory. "
+            "This file is required to map job results to tile sizes."
+        )
+
+    results_by_tile_size: dict[int, dict] = {}
+    for filename in sorted(os.listdir(results_dir)):
+        if not filename.startswith("job_results_") or not filename.endswith(".json"):
+            continue
+
+        job_id = filename.replace("job_results_", "").replace(".json", "")
+        filepath = os.path.join(results_dir, filename)
+        with open(filepath, "r", encoding="utf-8") as f:
+            result_data = json.load(f)
+
+        num_bits = result_data.get("total_qubits")
+        if num_bits is None:
+            print(f"WARNING: no total_qubits in {filename}; skipping")
+            continue
+        counts = [
+            _decompress_count_keys(d, num_bits) for d in result_data["counts"]
+        ]
+
+        info = submission_info.get(job_id, {})
+        tile_w = info.get("tile_width")
+        if tile_w is None:
+            print(f"WARNING: no submission info for job {job_id}; skipping {filename}")
+            continue
+
+        execution_s = _parse_double_slice_span_total_seconds(result_data)
+        if execution_s is None:
+            print(
+                f"  WARNING: could not parse DoubleSliceSpan times from {filename}; "
+                f"CSV avg_classification_s will use local wall-clock time."
+            )
+
+        results_by_tile_size[int(tile_w)] = {
+            "counts": counts,
+            "n_shots": info.get("total_shots"),
+            "shots_coef_k": info.get("shots_coef_k"),
+            "c_mode": info.get("classification_mode", "1"),
+            "job_id": job_id,
+            "n_tiles": info.get("n_tiles"),
+            "execution_s": execution_s,
+        }
+        exec_note = f", IBM span total {execution_s:.1f}s" if execution_s is not None else ""
+        n_circuits = len(counts)
+        per_circuit = info.get("total_shots")
+        if per_circuit is not None and n_circuits:
+            total_region_shots = int(per_circuit) * n_circuits
+            shot_note = (
+                f"{n_circuits} circuits × {per_circuit} shots/circuit "
+                f"= {total_region_shots:,} total shots (full region)"
+            )
+        else:
+            shot_note = f"{n_circuits} circuits, {per_circuit} shots/circuit"
+        print(f"  Loaded {filename}: tile {tile_w}x{tile_w}, {shot_note}{exec_note}")
+
+    if not results_by_tile_size:
+        raise FileNotFoundError(
+            f"No matching job_results_*.json files found in {results_dir}"
+        )
+
+    print(
+        f"Loaded hardware results for tile sizes: "
+        f"{sorted(results_by_tile_size.keys())}"
+    )
+    return results_by_tile_size
+
+
 def image_region_dimensions(
     image_path,
     image_x_offset,
@@ -984,6 +1132,7 @@ def test_shot_count_loop_vertex_classification_image_driver(
     hw_opt_level: int = 3,
     hw_seed_transpiler: int | None = None,
     hw_submit_only: bool = False,
+    hw_results: dict | None = None,
 ):
     """Run a shots-coefficient sweep over a tiled image classification experiment.
 
@@ -1024,6 +1173,7 @@ def test_shot_count_loop_vertex_classification_image_driver(
             hw_opt_level=hw_opt_level,
             hw_seed_transpiler=hw_seed_transpiler,
             hw_submit_only=hw_submit_only,
+            hw_results=hw_results,
         )
         tile_test_csv_rows.extend(rows)
 
@@ -1075,6 +1225,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
     hw_opt_level: int = 3,
     hw_seed_transpiler: int | None = None,
     hw_submit_only: bool = False,
+    hw_results: dict | None = None,
 ):
     """Run a tile-size sweep with multiple iterations and emit plots/CSV per configuration."""
     base_save = save_name if save_name is not None else safe_image_stem(image_path)
@@ -1136,6 +1287,8 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
 
             ############## CLASSIFICATION SECTION ##############
             classification_start_time = time.time()
+
+            hw_tile_data = (hw_results or {}).get(tw)
             classification_result = qcrank_ehands_vertex_classification_image(
                 pre,
                 weight,
@@ -1143,13 +1296,15 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 tile_width=tw,
                 tile_height=th,
                 c_mode=c_mode,
-                shots_coef=sc,
+                shots_coef=hw_tile_data["shots_coef_k"] if hw_tile_data else sc,
                 run_mode=run_mode,
                 hw_backend=hw_backend,
                 hw_rc=hw_rc,
                 hw_opt_level=hw_opt_level,
                 hw_seed_transpiler=hw_seed_transpiler,
                 hw_submit_only=hw_submit_only,
+                preloaded_counts=hw_tile_data["counts"] if hw_tile_data else None,
+                preloaded_n_shots=hw_tile_data["n_shots"] if hw_tile_data else None,
             )
 
             if isinstance(classification_result, str):
@@ -1244,15 +1399,36 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         average_mean_accuracy = total_mean_accuracy / n
         average_preprocess_time = total_preprocess_time / n
         average_classification_time = total_classification_time / n
+        hw_tile_for_csv = (hw_results or {}).get(tw)
+        exec_from_json = (
+            hw_tile_for_csv.get("execution_s")
+            if hw_tile_for_csv is not None
+            else None
+        )
+        if exec_from_json is not None:
+            average_classification_time = float(exec_from_json)
         average_postprocess_time = total_postprocess_time / n
         average_total_time = average_preprocess_time + average_classification_time + average_postprocess_time
-        overall_total_time = total_preprocess_time + total_classification_time + total_postprocess_time
+        if exec_from_json is not None:
+            overall_total_time = (
+                total_preprocess_time + float(exec_from_json) + total_postprocess_time
+            )
+        else:
+            overall_total_time = (
+                total_preprocess_time + total_classification_time + total_postprocess_time
+            )
         last_tile_size_mean_accuracy = average_mean_accuracy
 
         print(f"\nAverage times and mean accuracy for k={sc}, tile {tw}x{th} over {n} iterations:\n")
         print(f"Mean accuracy: {average_mean_accuracy:.3f}")
         print(f"Average preprocess time: {average_preprocess_time:.2f} seconds")
-        print(f"Average classification time: {average_classification_time:.2f} seconds")
+        if exec_from_json is not None:
+            print(
+                f"Average classification time: {average_classification_time:.2f} seconds "
+                f"(IBM DoubleSliceSpan total from job JSON)"
+            )
+        else:
+            print(f"Average classification time: {average_classification_time:.2f} seconds")
         print(f"Average postprocess time: {average_postprocess_time:.2f} seconds")
         print(f"Average total time: {average_total_time:.2f} seconds")
         print(f"Total time for k={sc}, tile {tw}x{th}: {overall_total_time:.2f} seconds")
@@ -1381,6 +1557,7 @@ def qcrank_ehands_vertex_classification_image_driver(
     hw_opt_level: int = 3,
     hw_seed_transpiler: int | None = None,
     hw_submit_only: bool = False,
+    hw_results: dict | None = None,
 ):
     """
     Top-level driver for the tiled image classification experiment (dispatches to tests).
@@ -1419,6 +1596,7 @@ def qcrank_ehands_vertex_classification_image_driver(
         hw_backend=hw_backend,
         hw_rc=hw_rc,
         hw_opt_level=hw_opt_level,
+        hw_results=hw_results,
         hw_seed_transpiler=hw_seed_transpiler,
         hw_submit_only=hw_submit_only,
     )
@@ -1438,15 +1616,21 @@ def qcrank_ehands_vertex_classification_image(
     hw_opt_level: int = 3,
     hw_seed_transpiler: int | None = None,
     hw_submit_only: bool = False,
+    preloaded_counts: list[dict] | None = None,
+    preloaded_n_shots: int | None = None,
 ):
     """
     Build all per-tile circuits, submit them as a single batch job, then recover EVs, classify, and accumulate.
+
+    When *preloaded_counts* is provided (a list of count-dicts, one per tile
+    circuit), Phase 2 (job submission) is skipped and the given counts are used
+    directly for reconstruction and classification (Phase 3).
     
     Credit to CursorAI for helping with the batch job submission.
     """
     stitch_records: list[ClassificationTileStitchRecord] = []
 
-    # Phase 1: Build all tile circuits without submitting any jobs
+    # Phase 1: Build all tile circuits (needed for QCrank reconstruction objects)
     tile_build_data: list[tuple[VertexClassifier, np.ndarray, int, int]] = []
     all_circuits: list[QuantumCircuit] = []
 
@@ -1483,10 +1667,18 @@ def qcrank_ehands_vertex_classification_image(
 
     print(f"Total circuits in batch: {len(all_circuits)}")
 
-    # Phase 2: Submit all circuits as a single batch job
+    # Phase 2: Obtain counts — either from preloaded hardware results or by running jobs
     n_shots = tile_build_data[0][0].di.n_data * (2**shots_coef)
 
-    if run_mode == "hardware":
+    if preloaded_counts is not None:
+        all_counts = preloaded_counts
+        if preloaded_n_shots is not None:
+            n_shots = preloaded_n_shots
+        print(
+            f"Using preloaded hardware counts ({len(all_counts)} circuits, "
+            f"n_shots={n_shots})"
+        )
+    elif run_mode == "hardware":
         if hw_backend is None:
             raise ValueError("hw_backend must be provided when run_mode='hardware'.")
         result = run_hardware_job_qcrank_batch(
@@ -2257,14 +2449,52 @@ if __name__ == "__main__":
             "2: Use iso-weight encoding."
         ),
     )
+    parser.add_argument(
+        "--hw-results-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory containing job_results_*.json files from a previous hardware run. "
+            "When set, skips circuit execution and uses the saved counts for post-processing. "
+            "Tile sizes and shots-coef are auto-detected from the results metadata. "
+            "Requires job_submission_info.json in the parent directory (JobOutputs/)."
+        ),
+    )
     args = parser.parse_args()
 
     #default_tile_sizes = (2, 4, 8, 16, 64)
     default_tile_sizes = (2, 4, 8, 16)
     iterations = args.iterations
 
+    # --- Hardware results post-processing path ---
+    hw_results = None
+    if args.hw_results_dir is not None:
+        hw_results = load_hw_results_from_dir(args.hw_results_dir)
+
+        hw_tile_sizes = tuple(sorted(hw_results.keys()))
+        first_entry = hw_results[hw_tile_sizes[0]]
+        hw_sc = first_entry["shots_coef_k"]
+        hw_c_mode = first_entry["c_mode"]
+
+        if args.c_mode == "auto":
+            args.c_mode = hw_c_mode
+            print(f"Auto-detected c_mode from hardware results: {args.c_mode}")
+        if args.c_mode != hw_c_mode:
+            print(
+                f"WARNING: --c-mode {args.c_mode} differs from hardware results "
+                f"c_mode {hw_c_mode}; using --c-mode value."
+            )
+
+        print(
+            f"Hardware post-processing: tile sizes {hw_tile_sizes}, "
+            f"shots_coef_k={hw_sc}, c_mode={args.c_mode}, iterations=1"
+        )
+
     tw, th = args.tile_width, args.tile_height
-    if tw is not None or th is not None:
+    if hw_results is not None:
+        tile_sizes = tuple(sorted(hw_results.keys()))
+        iterations = 1
+    elif tw is not None or th is not None:
         if tw is None or th is None:
             parser.error("Use both --tile-width and --tile-height together, or omit both for the default tile test.")
         if tw < 1 or th < 1:
@@ -2281,7 +2511,9 @@ if __name__ == "__main__":
 
     sim = None
     hw_backend = None
-    if args.run_mode == "sim":
+    if hw_results is not None:
+        pass
+    elif args.run_mode == "sim":
         sim = build_sim_backend(args.backend)
     else:
         if not args.ibm_backend:
@@ -2315,9 +2547,16 @@ if __name__ == "__main__":
         hw_opt_level=int(args.hw_opt_level),
         hw_seed_transpiler=args.hw_seed_transpiler,
         hw_submit_only=bool(args.hw_submit_only),
+        hw_results=hw_results,
     )
 
-    if args.test == "full":
+    if hw_results is not None:
+        sc = hw_results[tile_sizes[0]]["shots_coef_k"]
+        test_tile_size_iteration_loop_vertex_classification_image_driver(
+            **common_kwargs,
+            sc=int(sc),
+        )
+    elif args.test == "full":
         qcrank_ehands_vertex_classification_image_driver(**common_kwargs)
     elif args.test == "shots":
         test_shot_count_loop_vertex_classification_image_driver(
