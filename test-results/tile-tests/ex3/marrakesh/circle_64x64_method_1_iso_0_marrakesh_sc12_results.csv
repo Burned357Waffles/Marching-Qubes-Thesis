@@ -1,0 +1,6 @@
+image_path,tile_size,iterations,iterations_completed,mean_accuracy,mean_accuracy_sem,avg_data_recErr,avg_preprocess_s,avg_classification_s,avg_postprocess_s,avg_total_s,total_time_5iter_s
+test_images\test_concentric_circles_64x64.png,2x2,5,5,0.99668,0.000398,0.014628,0.0,58.76,0.0,58.77,293.83
+test_images\test_concentric_circles_64x64.png,4x4,5,5,0.99458,0.000322,0.014739,0.0,60.08,0.0,60.09,300.43
+test_images\test_concentric_circles_64x64.png,8x8,5,5,0.987207,0.000581,0.015067,0.0,58.57,0.0,58.57,292.83
+test_images\test_concentric_circles_64x64.png,16x16,5,5,0.924609,0.00481,0.015615,0.0,95.4,0.0,95.4,477.02
+test_images\test_concentric_circles_64x64.png,64x64,5,1,0.597412,0.0,0.01588,0.0,699.71,0.0,699.71,699.71

@@ -1,0 +1,6 @@
+image_path,tile_size,iterations,iterations_completed,mean_accuracy,mean_accuracy_sem,avg_data_recErr,avg_preprocess_s,avg_classification_s,avg_postprocess_s,avg_total_s,total_time_5iter_s
+test_images\Plant_tissue_sections_2_64x64.jpg,2x2,5,5,0.98042,0.000701,0.01523,0.0,93.19,0.0,93.19,465.97
+test_images\Plant_tissue_sections_2_64x64.jpg,4x4,5,5,0.980127,0.000644,0.015231,0.0,50.17,0.0,50.17,250.84
+test_images\Plant_tissue_sections_2_64x64.jpg,8x8,5,5,0.982812,0.00057,0.015231,0.0,42.82,0.0,42.82,214.1
+test_images\Plant_tissue_sections_2_64x64.jpg,16x16,5,5,0.978613,0.000723,0.015231,0.0,42.14,0.0,42.14,210.71
+test_images\Plant_tissue_sections_2_64x64.jpg,64x64,5,5,0.978906,0.001154,0.01523,0.0,43.72,0.0,43.72,218.58

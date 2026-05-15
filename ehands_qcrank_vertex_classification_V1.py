@@ -23,7 +23,7 @@ import qiskit
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
-from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino
+from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino, FakeMiami, FakeBoston
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
 from qiskit.transpiler import generate_preset_pass_manager
 
@@ -380,7 +380,9 @@ def configure_aer_sim():
 
 def build_sim_backend(backend: str):
     """
-    Return a simulation backend instance by name ('aer', 'fake_torino', 'fake_marrakesh').
+    Return a simulation backend instance by name (
+        'aer', 'fake_torino', 'fake_marrakesh', 'fake_miami', 'fake_boston'
+    ).
     
     Credit to CursorAI for the following code.
     """
@@ -397,8 +399,19 @@ def build_sim_backend(backend: str):
         print(sim)
         print(f"\nConfiguration: {sim.configuration()}")
         return sim
+    if key == "fake_miami":
+        sim = FakeMiami()
+        print(sim)
+        print(f"\nConfiguration: {sim.configuration()}")
+        return sim
+    if key == "fake_boston":
+        sim = FakeBoston()
+        print(sim)
+        print(f"\nConfiguration: {sim.configuration()}")
+        return sim
     raise ValueError(
-        f"Unknown backend {backend!r}; expected 'aer', 'fake_torino', or 'fake_marrakesh'."
+        f"Unknown backend {backend!r}; expected 'aer', 'fake_torino', 'fake_marrakesh', "
+        "'fake_miami', or 'fake_boston'."
     )
 
 
@@ -640,13 +653,26 @@ def _parse_double_slice_span_total_seconds(result_data: dict) -> float | None:
     return total
 
 
+def _find_job_submission_info(results_dir: str) -> str | None:
+    """Walk up from *results_dir* until ``job_submission_info.json`` is found."""
+    current = os.path.abspath(results_dir)
+    while True:
+        candidate = os.path.join(current, "job_submission_info.json")
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 def load_hw_results_from_dir(results_dir):
     """
     Load hardware job results from a directory of ``job_results_*.json`` files.
 
-    Cross-references ``job_submission_info.json`` (looked up in the parent
-    directory first, then in *results_dir* itself) to obtain per-job tile
-    metadata.
+    Cross-references ``job_submission_info.json`` (walked up from *results_dir*
+    through ancestor directories, e.g. ``JobOutputs/`` for nested layouts like
+    ``JobOutputs/<backend>/<shape>/``) to obtain per-job tile metadata.
 
     Returns ``{tile_width: {"counts": [...], "n_shots": int, "shots_coef_k": int,
     "c_mode": str, "job_id": str, "n_tiles": int,
@@ -658,21 +684,15 @@ def load_hw_results_from_dir(results_dir):
     """
     results_dir = os.path.normpath(results_dir)
 
-    submission_info = {}
-    for candidate in [
-        os.path.join(os.path.dirname(results_dir), "job_submission_info.json"),
-        os.path.join(results_dir, "job_submission_info.json"),
-    ]:
-        if os.path.isfile(candidate):
-            with open(candidate, "r", encoding="utf-8") as f:
-                submission_info = json.load(f)
-            print(f"Loaded submission info from {candidate}")
-            break
-    if not submission_info:
+    submission_info_path = _find_job_submission_info(results_dir)
+    if submission_info_path is None:
         raise FileNotFoundError(
-            "Could not find job_submission_info.json in the parent or results directory. "
+            f"Could not find job_submission_info.json at or above {results_dir}. "
             "This file is required to map job results to tile sizes."
         )
+    with open(submission_info_path, "r", encoding="utf-8") as f:
+        submission_info = json.load(f)
+    print(f"Loaded submission info from {submission_info_path}")
 
     results_by_tile_size: dict[int, dict] = {}
     for filename in sorted(os.listdir(results_dir)):
@@ -769,6 +789,37 @@ def image_region_dimensions(
             f"exceeds image bounds (available {max_w}x{max_h})."
         )
     return rw, rh
+
+
+def filter_tile_sizes_for_region(tile_sizes, rw: int, rh: int) -> tuple[int, ...]:
+    """
+    Keep only square tile edges ``t`` with ``1 <= t <= rw`` and ``t <= rh``.
+
+    Larger values would pad an entire ``t x t`` circuit tile for a smaller region
+    (see ``prepare_qcrank_ehands_vertex_classification_image``); those sizes are dropped.
+    """
+    kept: list[int] = []
+    dropped: list[int] = []
+    for t in tile_sizes:
+        ti = int(t)
+        if ti < 1:
+            dropped.append(ti)
+            continue
+        if ti > rw or ti > rh:
+            dropped.append(ti)
+            continue
+        kept.append(ti)
+    if dropped:
+        uniq = sorted({int(x) for x in dropped})
+        print(
+            f"Tile-size filter for {rw}x{rh} region: removed {uniq} "
+            f"(tile edge exceeds region width or height). Using {tuple(kept)}."
+        )
+    if not kept:
+        raise ValueError(
+            f"No tile sizes remain after filtering {tuple(tile_sizes)!r} for region {rw}x{rh}."
+        )
+    return tuple(kept)
 
 
 def auto_isovalue_median(normalized_pixels_1d):
@@ -1143,6 +1194,16 @@ def test_shot_count_loop_vertex_classification_image_driver(
     else:
         shots_coef_iter = tuple(int(x) for x in shots_coef)
 
+    if hw_results is None:
+        rw_f, rh_f = image_region_dimensions(
+            image_path,
+            image_x_offset,
+            image_y_offset,
+            region_width,
+            region_height,
+        )
+        tile_sizes = filter_tile_sizes_for_region(tile_sizes, rw_f, rh_f)
+
     base_save = save_name if save_name is not None else safe_image_stem(image_path)
     tile_test_csv_rows: list[dict[str, object]] = []
     last_tile_size_mean_accuracy = 0.0
@@ -1184,7 +1245,10 @@ def test_shot_count_loop_vertex_classification_image_driver(
         "shot_scale_2_pow_k",
         "tile_size",
         "iterations",
+        "iterations_completed",
         "mean_accuracy",
+        "mean_accuracy_sem",
+        "avg_data_recErr",
         "avg_preprocess_s",
         "avg_classification_s",
         "avg_postprocess_s",
@@ -1246,170 +1310,207 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         total_preprocess_time = 0.0
         total_classification_time = 0.0
         total_postprocess_time = 0.0
-        total_mean_accuracy = 0.0
+        total_mean_data_rec_err = 0.0
+        mean_accuracy_per_iteration: list[float] = []
 
         # Per-tile-size accumulators across all iterations of this tile size.
         size_classical_minus_iso_vals: list[np.ndarray] = []
         size_quantum_ev_vals: list[np.ndarray] = []
 
+        tile_aborted = False
         for i in range(iterations):
             print(f"\nIteration {i + 1}:")
-            ############## PREPROCESS SECTION ##############
-            preprocess_start_time = time.time()
-            pre = prepare_qcrank_ehands_vertex_classification_image(
-                isovalue=isovalue,
-                weight=weight,
-                image_path=image_path,
-                tile_width=tw,
-                tile_height=th,
-                image_x_offset=image_x_offset,
-                image_y_offset=image_y_offset,
-                region_width=region_width,
-                region_height=region_height,
-                isovalue_mode=isovalue_mode,
-                inside_bias=inside_bias,
-            )
-            if c_mode == "2":
-                # make t'
-                pre.image_isovalue_proc = (pre.image_isovalue_proc + 1) / 2
+            try:
+                ############## PREPROCESS SECTION ##############
+                preprocess_start_time = time.time()
+                pre = prepare_qcrank_ehands_vertex_classification_image(
+                    isovalue=isovalue,
+                    weight=weight,
+                    image_path=image_path,
+                    tile_width=tw,
+                    tile_height=th,
+                    image_x_offset=image_x_offset,
+                    image_y_offset=image_y_offset,
+                    region_width=region_width,
+                    region_height=region_height,
+                    isovalue_mode=isovalue_mode,
+                    inside_bias=inside_bias,
+                )
+                if c_mode == "2":
+                    # make t'
+                    pre.image_isovalue_proc = (pre.image_isovalue_proc + 1) / 2
 
-                # make x'
-                pre.region_proc = (pre.region_proc + 1) / 2
+                    # make x'
+                    pre.region_proc = (pre.region_proc + 1) / 2
 
-                # make w'
-                pre.compose_weight = 1 / (2 * (1 - pre.image_isovalue_proc))
+                    # make w'
+                    pre.compose_weight = 1 / (2 * (1 - pre.image_isovalue_proc))
 
-                # set new classification threshold
-                pre.class_threshold = 0.5
+                    # set new classification threshold
+                    pre.class_threshold = 0.5
 
-            preprocess_end_time = time.time()
-            preprocess_time = preprocess_end_time - preprocess_start_time
+                preprocess_end_time = time.time()
+                preprocess_time = preprocess_end_time - preprocess_start_time
 
-            ############## CLASSIFICATION SECTION ##############
-            classification_start_time = time.time()
+                ############## CLASSIFICATION SECTION ##############
+                classification_start_time = time.time()
 
-            hw_tile_data = (hw_results or {}).get(tw)
-            classification_result = qcrank_ehands_vertex_classification_image(
-                pre,
-                weight,
-                sim,
-                tile_width=tw,
-                tile_height=th,
-                c_mode=c_mode,
-                shots_coef=hw_tile_data["shots_coef_k"] if hw_tile_data else sc,
-                run_mode=run_mode,
-                hw_backend=hw_backend,
-                hw_rc=hw_rc,
-                hw_opt_level=hw_opt_level,
-                hw_seed_transpiler=hw_seed_transpiler,
-                hw_submit_only=hw_submit_only,
-                preloaded_counts=hw_tile_data["counts"] if hw_tile_data else None,
-                preloaded_n_shots=hw_tile_data["n_shots"] if hw_tile_data else None,
-            )
+                hw_tile_data = (hw_results or {}).get(tw)
+                classification_result = qcrank_ehands_vertex_classification_image(
+                    pre,
+                    weight,
+                    sim,
+                    tile_width=tw,
+                    tile_height=th,
+                    c_mode=c_mode,
+                    shots_coef=hw_tile_data["shots_coef_k"] if hw_tile_data else sc,
+                    run_mode=run_mode,
+                    hw_backend=hw_backend,
+                    hw_rc=hw_rc,
+                    hw_opt_level=hw_opt_level,
+                    hw_seed_transpiler=hw_seed_transpiler,
+                    hw_submit_only=hw_submit_only,
+                    preloaded_counts=hw_tile_data["counts"] if hw_tile_data else None,
+                    preloaded_n_shots=hw_tile_data["n_shots"] if hw_tile_data else None,
+                )
 
-            if isinstance(classification_result, str):
-                submitted_job_ids.append(classification_result)
-                continue
+                if isinstance(classification_result, str):
+                    submitted_job_ids.append(classification_result)
+                    continue
 
-            all_rec_list, all_data_list, pre, stitch_records = classification_result
+                all_rec_list, all_data_list, pre, stitch_records, mean_data_rec_err = (
+                    classification_result
+                )
 
-            classification_end_time = time.time()
-            classification_time = classification_end_time - classification_start_time
+                classification_end_time = time.time()
+                classification_time = classification_end_time - classification_start_time
 
-            ############## POSTPROCESS SECTION ##############
-            postprocess_start_time = time.time()
-            stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
-            plot_ctx = build_classification_plot_context(
-                pre,
-                image_path,
-                tw,
-                th,
-                image_x_offset,
-                image_y_offset,
-                run_save_name,
-            )
-            postprocess_end_time = time.time()
-            postprocess_time = postprocess_end_time - postprocess_start_time
+                ############## POSTPROCESS SECTION ##############
+                postprocess_start_time = time.time()
+                stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
+                plot_ctx = build_classification_plot_context(
+                    pre,
+                    image_path,
+                    tw,
+                    th,
+                    image_x_offset,
+                    image_y_offset,
+                    run_save_name,
+                )
+                postprocess_end_time = time.time()
+                postprocess_time = postprocess_end_time - postprocess_start_time
 
-            ############## PLOT SECTION ##############
-            print_datapoint_classification_tables_if_any(pre)
+                ############## PLOT SECTION ##############
+                print_datapoint_classification_tables_if_any(pre)
 
-            summary_out, side_by_side_out, _ = classification_output_paths(
-                plot_ctx["image_path"],
-                plot_ctx["rw"],
-                plot_ctx["rh"],
-                plot_ctx["tile_width"],
-                plot_ctx["tile_height"],
-                plot_ctx["image_x_offset"],
-                plot_ctx["image_y_offset"],
-                plot_ctx["save_name"],
-            )
+                summary_out, side_by_side_out, _ = classification_output_paths(
+                    plot_ctx["image_path"],
+                    plot_ctx["rw"],
+                    plot_ctx["rh"],
+                    plot_ctx["tile_width"],
+                    plot_ctx["tile_height"],
+                    plot_ctx["image_x_offset"],
+                    plot_ctx["image_y_offset"],
+                    plot_ctx["save_name"],
+                )
 
-            print(f"Saving classification summary to: {summary_out}")
-            print(f"Saving side-by-side figure to: {side_by_side_out}")
-            mean_accuracy = plot_classification_summary_figure(
-                region_width=plot_ctx["rw"],
-                region_height=plot_ctx["rh"],
-                tile_width=plot_ctx["tile_width"],
-                tile_height=plot_ctx["tile_height"],
-                acc_list=plot_ctx["acc_list"],
-                cm_list=plot_ctx["cm_list"],
-                agg_counts=plot_ctx["agg_counts"],
-                all_correct_vals=plot_ctx["all_correct_vals"],
-                all_incorrect_vals=plot_ctx["all_incorrect_vals"],
-                all_true_inside_vals=plot_ctx["all_true_inside_vals"],
-                all_true_outside_vals=plot_ctx["all_true_outside_vals"],
-                out_name=summary_out,
-                bins=20,
-            )
+                print(f"Saving classification summary to: {summary_out}")
+                print(f"Saving side-by-side figure to: {side_by_side_out}")
+                mean_accuracy = plot_classification_summary_figure(
+                    region_width=plot_ctx["rw"],
+                    region_height=plot_ctx["rh"],
+                    tile_width=plot_ctx["tile_width"],
+                    tile_height=plot_ctx["tile_height"],
+                    acc_list=plot_ctx["acc_list"],
+                    cm_list=plot_ctx["cm_list"],
+                    agg_counts=plot_ctx["agg_counts"],
+                    all_correct_vals=plot_ctx["all_correct_vals"],
+                    all_incorrect_vals=plot_ctx["all_incorrect_vals"],
+                    all_true_inside_vals=plot_ctx["all_true_inside_vals"],
+                    all_true_outside_vals=plot_ctx["all_true_outside_vals"],
+                    out_name=summary_out,
+                    bins=20,
+                )
 
-            if c_mode == "1":
-                input_value_range = (-1.0, 1.0)
-            else:
-                input_value_range = (0.0, 1.0)
-            plot_full_image_vs_classification(
-                plot_ctx["padded_canvas_gray"],
-                plot_ctx["padded_canvas_true"],
-                plot_ctx["padded_canvas_pred"],
-                out_name=side_by_side_out,
-                input_value_range=input_value_range,
-                region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
-            )
+                if c_mode == "1":
+                    input_value_range = (-1.0, 1.0)
+                else:
+                    input_value_range = (0.0, 1.0)
+                plot_full_image_vs_classification(
+                    plot_ctx["padded_canvas_gray"],
+                    plot_ctx["padded_canvas_true"],
+                    plot_ctx["padded_canvas_pred"],
+                    out_name=side_by_side_out,
+                    input_value_range=input_value_range,
+                    region_size_hw=(plot_ctx["rh"], plot_ctx["rw"]),
+                )
 
-            size_classical_minus_iso_vals.extend(plot_ctx["all_classical_minus_iso_vals"])
-            size_quantum_ev_vals.extend(plot_ctx["all_quantum_ev_vals"])
+                size_classical_minus_iso_vals.extend(plot_ctx["all_classical_minus_iso_vals"])
+                size_quantum_ev_vals.extend(plot_ctx["all_quantum_ev_vals"])
 
-            ############## SUMMARY ##############
+                ############## SUMMARY ##############
 
-            total_time = preprocess_time + classification_time + postprocess_time
-            total_preprocess_time += preprocess_time
-            total_classification_time += classification_time
-            total_postprocess_time += postprocess_time
-            total_mean_accuracy += mean_accuracy
+                total_time = preprocess_time + classification_time + postprocess_time
+                total_preprocess_time += preprocess_time
+                total_classification_time += classification_time
+                total_postprocess_time += postprocess_time
+                mean_accuracy_per_iteration.append(float(mean_accuracy))
+                total_mean_data_rec_err += mean_data_rec_err
 
-            print(f"\nPreprocess time for iteration {i + 1}: {preprocess_time:.2f} seconds")
-            print(f"Classification time for iteration {i + 1}: {classification_time:.2f} seconds")
-            print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
-            print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
+                print(f"\nPreprocess time for iteration {i + 1}: {preprocess_time:.2f} seconds")
+                print(f"Classification time for iteration {i + 1}: {classification_time:.2f} seconds")
+                print(f"Postprocess time for iteration {i + 1}: {postprocess_time:.2f} seconds")
+                print(f"Total time for iteration {i + 1}: {total_time:.2f} seconds")
+            except Exception as exc:
+                import traceback
+
+                tile_aborted = True
+                print(
+                    f"\n!!! Error during tile {tw}x{th} (k={sc}), iteration {i + 1}: {exc}\n"
+                    f"    Skipping remaining iterations for this tile size; "
+                    f"run will continue with other tile sizes."
+                )
+                traceback.print_exc()
+                break
 
         if hw_submit_only:
             continue
 
         n = iterations
-        average_mean_accuracy = total_mean_accuracy / n
-        average_preprocess_time = total_preprocess_time / n
-        average_classification_time = total_classification_time / n
+        ni = len(mean_accuracy_per_iteration)
+        if tile_aborted or ni != n:
+            if ni == 0:
+                print(
+                    f"\nTile {tw}x{th}: no iterations completed successfully; "
+                    f"writing a CSV row with zeroed metrics (planned {n} iterations)."
+                )
+            else:
+                print(
+                    f"\nTile {tw}x{th} cancelled or incomplete: {ni}/{n} iterations completed; "
+                    f"writing CSV row from completed iterations only."
+                )
+
+        average_mean_accuracy = float(np.mean(mean_accuracy_per_iteration)) if ni else 0.0
+        if ni > 1:
+            mean_accuracy_sem = float(
+                np.std(mean_accuracy_per_iteration, ddof=1) / np.sqrt(ni)
+            )
+        else:
+            mean_accuracy_sem = 0.0
+        average_mean_data_rec_err = (total_mean_data_rec_err / ni) if ni else 0.0
+        average_preprocess_time = (total_preprocess_time / ni) if ni else 0.0
+        average_classification_time = (total_classification_time / ni) if ni else 0.0
         hw_tile_for_csv = (hw_results or {}).get(tw)
         exec_from_json = (
             hw_tile_for_csv.get("execution_s")
             if hw_tile_for_csv is not None
             else None
         )
-        if exec_from_json is not None:
+        if exec_from_json is not None and ni > 0:
             average_classification_time = float(exec_from_json)
-        average_postprocess_time = total_postprocess_time / n
+        average_postprocess_time = (total_postprocess_time / ni) if ni else 0.0
         average_total_time = average_preprocess_time + average_classification_time + average_postprocess_time
-        if exec_from_json is not None:
+        if exec_from_json is not None and ni > 0:
             overall_total_time = (
                 total_preprocess_time + float(exec_from_json) + total_postprocess_time
             )
@@ -1417,12 +1518,15 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
             overall_total_time = (
                 total_preprocess_time + total_classification_time + total_postprocess_time
             )
-        last_tile_size_mean_accuracy = average_mean_accuracy
+        if ni > 0:
+            last_tile_size_mean_accuracy = average_mean_accuracy
 
-        print(f"\nAverage times and mean accuracy for k={sc}, tile {tw}x{th} over {n} iterations:\n")
-        print(f"Mean accuracy: {average_mean_accuracy:.3f}")
+        iter_label = f"{ni} completed (of {n} planned)" if ni != n else f"{n}"
+        print(f"\nAverage times and mean accuracy for k={sc}, tile {tw}x{th} over {iter_label} iterations:\n")
+        print(f"Mean accuracy: {average_mean_accuracy:.3f} (SEM over iterations: {mean_accuracy_sem:.4g})")
+        print(f"Average mean data_recErr (over tiles, then iterations): {average_mean_data_rec_err:.6g}")
         print(f"Average preprocess time: {average_preprocess_time:.2f} seconds")
-        if exec_from_json is not None:
+        if exec_from_json is not None and ni > 0:
             print(
                 f"Average classification time: {average_classification_time:.2f} seconds "
                 f"(IBM DoubleSliceSpan total from job JSON)"
@@ -1440,7 +1544,10 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 "shot_scale_2_pow_k": 2**sc,
                 "tile_size": f"{tw}x{th}",
                 "iterations": n,
+                "iterations_completed": ni,
                 "mean_accuracy": round(average_mean_accuracy, 6),
+                "mean_accuracy_sem": round(mean_accuracy_sem, 6),
+                "avg_data_recErr": round(average_mean_data_rec_err, 6),
                 "avg_preprocess_s": round(average_preprocess_time, 2),
                 "avg_classification_s": round(average_classification_time, 2),
                 "avg_postprocess_s": round(average_postprocess_time, 2),
@@ -1456,27 +1563,32 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
             f"{size_residual_dir}/{base_save}_sc{sc}_{tw}x{th}"
             f"_classical_minus_isovalue_vs_quantum_ev.png"
         )
-        try:
-            n_classical = sum(np.asarray(a).size for a in size_classical_minus_iso_vals)
-            n_quantum = sum(np.asarray(a).size for a in size_quantum_ev_vals)
-            print(
-                f"\n[k={sc}] Tile {tw}x{th} aggregated residual plot inputs: "
-                f"classical points={n_classical}, quantum points={n_quantum}, "
-                f"chunks={len(size_classical_minus_iso_vals)} (over {n} iterations)"
-            )
-            plot_classical_minus_isovalue_vs_quantum_ev(
-                all_classical_minus_iso_vals=size_classical_minus_iso_vals,
-                all_quantum_ev_vals=size_quantum_ev_vals,
-                out_name=size_residual_out,
-            )
-        except Exception as exc:
-            import traceback
-            print(f"!!! Residual plot generation failed for {size_residual_out}: {exc}")
-            traceback.print_exc()
+        if ni > 0 and size_classical_minus_iso_vals:
+            try:
+                n_classical = sum(np.asarray(a).size for a in size_classical_minus_iso_vals)
+                n_quantum = sum(np.asarray(a).size for a in size_quantum_ev_vals)
+                print(
+                    f"\n[k={sc}] Tile {tw}x{th} aggregated residual plot inputs: "
+                    f"classical points={n_classical}, quantum points={n_quantum}, "
+                    f"chunks={len(size_classical_minus_iso_vals)} (over {ni} completed iterations)"
+                )
+                plot_classical_minus_isovalue_vs_quantum_ev(
+                    all_classical_minus_iso_vals=size_classical_minus_iso_vals,
+                    all_quantum_ev_vals=size_quantum_ev_vals,
+                    out_name=size_residual_out,
+                )
+            except Exception as exc:
+                import traceback
+
+                print(f"!!! Residual plot generation failed for {size_residual_out}: {exc}")
+                traceback.print_exc()
+        elif ni == 0:
+            print(f"\n[k={sc}] Tile {tw}x{th}: skipping per-tile residual plot (no completed iterations).")
 
         # Roll this tile size's data into the test-level accumulators.
-        test_classical_minus_iso_vals.extend(size_classical_minus_iso_vals)
-        test_quantum_ev_vals.extend(size_quantum_ev_vals)
+        if ni > 0:
+            test_classical_minus_iso_vals.extend(size_classical_minus_iso_vals)
+            test_quantum_ev_vals.extend(size_quantum_ev_vals)
 
     if submitted_job_ids:
         print(f"\nAll hardware jobs submitted ({len(submitted_job_ids)} total):")
@@ -1490,7 +1602,10 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         "image_path",
         "tile_size",
         "iterations",
+        "iterations_completed",
         "mean_accuracy",
+        "mean_accuracy_sem",
+        "avg_data_recErr",
         "avg_preprocess_s",
         "avg_classification_s",
         "avg_postprocess_s",
@@ -1569,6 +1684,7 @@ def qcrank_ehands_vertex_classification_image_driver(
         shots_coef_iter = (int(shots_coef),)
     else:
         shots_coef_iter = tuple(int(x) for x in shots_coef)
+
     print(
         f"Shots exponents k (n_shots = n_data * 2**k per tile): {shots_coef_iter}; "
         f"tile sizes: {tile_sizes}; {iterations} iterations per (k, tile size)."
@@ -1705,10 +1821,14 @@ def qcrank_ehands_vertex_classification_image(
         all_counts = run_sim_job_qcrank_batch(all_circuits, sim, n_shots)
 
     # Phase 3: Process results per-tile
+    mean_data_rec_err_tile_means: list[float] = []
     for tile_index, (vc, padded_tile, ty, tx) in enumerate(tile_build_data):
         countsL = [all_counts[tile_index]]
 
-        vc.recover_data(n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose=False)
+        _, _, _, data_recErr = vc.recover_data(
+            n_shots, countsL, pre.all_data_list, pre.all_rec_list, verbose=False
+        )
+        mean_data_rec_err_tile_means.append(float(np.mean(np.asarray(data_recErr))))
 
         classifications = vc.c_classify(pre.all_rec_list)
         comp = vc.compare_against_input(classifications, weight)
@@ -1773,7 +1893,12 @@ def qcrank_ehands_vertex_classification_image(
             )
         )
 
-    return pre.all_rec_list, pre.all_data_list, pre, stitch_records
+    mean_data_rec_err = (
+        float(np.mean(mean_data_rec_err_tile_means))
+        if mean_data_rec_err_tile_means
+        else float("nan")
+    )
+    return pre.all_rec_list, pre.all_data_list, pre, stitch_records, mean_data_rec_err
 
 
 # -------------------------------- Plots --------------------------------
@@ -2372,11 +2497,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         type=str,
-        choices=("aer", "fake_torino", "fake_marrakesh"),
+        choices=("aer", "fake_torino", "fake_marrakesh", "fake_miami", "fake_boston"),
         default="aer",
         help=(
             "Simulation backend for qiskit_ibm_runtime Sampler: "
-            "aer, fake_torino, or fake_marrakesh."
+            "aer, fake_torino, fake_marrakesh, fake_miami, or fake_boston "
+            "(fake_miami/fake_boston require qiskit-ibm-runtime>=0.47.0)."
         ),
     )
     parser.add_argument(
@@ -2457,13 +2583,13 @@ if __name__ == "__main__":
             "Directory containing job_results_*.json files from a previous hardware run. "
             "When set, skips circuit execution and uses the saved counts for post-processing. "
             "Tile sizes and shots-coef are auto-detected from the results metadata. "
-            "Requires job_submission_info.json in the parent directory (JobOutputs/)."
+            "Requires job_submission_info.json in JobOutputs/ (walked up from this path)."
         ),
     )
     args = parser.parse_args()
 
-    #default_tile_sizes = (2, 4, 8, 16, 64)
-    default_tile_sizes = (2, 4, 8, 16)
+    default_tile_sizes = (2, 4, 8, 16, 64)
+    #default_tile_sizes = (2, 4, 8, 16)
     iterations = args.iterations
 
     # --- Hardware results post-processing path ---
@@ -2502,6 +2628,16 @@ if __name__ == "__main__":
         tile_sizes = (tw,)
     else:
         tile_sizes = default_tile_sizes
+
+    if hw_results is None:
+        rw_f, rh_f = image_region_dimensions(
+            args.image_path,
+            args.image_x_offset,
+            args.image_y_offset,
+            args.region_width,
+            args.region_height,
+        )
+        tile_sizes = filter_tile_sizes_for_region(tile_sizes, rw_f, rh_f)
 
     weight = 0.5
 
