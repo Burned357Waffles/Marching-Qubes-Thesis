@@ -1316,7 +1316,6 @@ def retrieve_real_results(job_id, nq_addr, target_qubit, overlap, n_tiles, accou
         # echo check, ewb
         print("account_credentials_name=", account_credentials_name)
         service = QiskitRuntimeService(name=account_credentials_name)
-        service.active_account() # this will print the active account information, including the private API key.
         counts= save_job_results(job_id, service)
     target_qubit = target_qubit
     tile_output = qcrank_to_ehands_decoding(counts, nq_addr, ehands=True, target_qubit=target_qubit)
