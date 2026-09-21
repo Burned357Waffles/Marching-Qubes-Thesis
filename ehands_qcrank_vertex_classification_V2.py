@@ -5,11 +5,6 @@ from contextlib import redirect_stdout
 from typing import NamedTuple
 from PIL import Image
 import numpy as np
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 from math import pi
 import sys
 import re
@@ -23,7 +18,16 @@ import qiskit
 from qiskit import QuantumCircuit, transpile
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
-from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino, FakeMiami, FakeBoston
+from qiskit_ibm_runtime.fake_provider import FakeMarrakesh, FakeTorino
+
+try:
+    from qiskit_ibm_runtime.fake_provider import FakeMiami
+except ImportError:
+    FakeMiami = None
+try:
+    from qiskit_ibm_runtime.fake_provider import FakeBoston
+except ImportError:
+    FakeBoston = None
 from qiskit_ibm_runtime.options.sampler_options import SamplerOptions
 from qiskit.transpiler import generate_preset_pass_manager
 
@@ -48,31 +52,6 @@ print(f"Added to sys.path: {circuits_path}")
 print(f"Current working directory: {os.getcwd()}")
 
 from datacircuits.ParametricQCrankV2 import ParametricQCrankV2 as QCrankV2
-
-_MC_DIR = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "exploration_notebooks",
-    "3D-testing",
-)
-if _MC_DIR not in sys.path:
-    sys.path.insert(0, _MC_DIR)
-
-try:
-    import vtk
-    from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
-    import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
-    import vtkmodules.vtkInteractionStyle  # noqa: F401
-    import vtkmodules.vtkRenderingFreeType  # noqa: F401
-    from custom_marching_cubes import marching_cubes as _marching_cubes
-
-    _VTK_MC_AVAILABLE = True
-except Exception as exc:
-    vtk = None
-    numpy_to_vtk = None
-    vtk_to_numpy = None
-    _marching_cubes = None
-    _VTK_MC_AVAILABLE = False
-    print(f"VTK / labeled marching cubes unavailable ({exc}); 3D mesh extract disabled.")
 
 print("imports complete")
 
@@ -474,11 +453,19 @@ def build_sim_backend(backend: str):
         print(f"\nConfiguration: {sim.configuration()}")
         return sim
     if key == "fake_miami":
+        if FakeMiami is None:
+            raise ValueError(
+                "FakeMiami is not available in this qiskit-ibm-runtime version."
+            )
         sim = FakeMiami()
         print(sim)
         print(f"\nConfiguration: {sim.configuration()}")
         return sim
     if key == "fake_boston":
+        if FakeBoston is None:
+            raise ValueError(
+                "FakeBoston is not available in this qiskit-ibm-runtime version."
+            )
         sim = FakeBoston()
         print(sim)
         print(f"\nConfiguration: {sim.configuration()}")
@@ -814,7 +801,7 @@ def load_hw_results_from_dir(results_dir):
         if per_circuit is not None and n_circuits:
             total_region_shots = int(per_circuit) * n_circuits
             shot_note = (
-                f"{n_circuits} circuits × {per_circuit} shots/circuit "
+                f"{n_circuits} circuits x {per_circuit} shots/circuit "
                 f"= {total_region_shots:,} total shots (full region)"
             )
         else:
@@ -963,21 +950,6 @@ def original_isovalue_to_encoded(iso_orig):
     return float(np.clip(2.0 * float(iso_orig) - 1.0, -1.0, 1.0))
 
 
-def classify_vertex_classical(input_val, isolevel):
-    """VTK-style inside test: 1 iff value >= isolevel (notebook)."""
-    inside = np.asarray(input_val) >= isolevel
-    if inside.ndim == 0:
-        return int(inside)
-    return inside.astype(np.uint8, copy=False)
-
-
-def quantum_classes_to_mc_labels(y, shape):
-    """Map quantum class 0 (inside) to VTK label 1."""
-    n = int(np.prod(shape))
-    pred = np.asarray(y, dtype=int).reshape(-1)[:n]
-    labels = (pred == 0).astype(np.uint8)
-    return labels.reshape(shape)
-
 
 def filter_circuit_sizes(circuit_sizes) -> tuple[int, ...]:
     """Keep positive power-of-two circuit address counts."""
@@ -1029,35 +1001,6 @@ def safe_image_stem(image_path: str) -> str:
     return stem or "image"
 
 
-def classification_output_paths(
-    dataset_name: str,
-    volume_shape: tuple[int, int, int],
-    circuit_size: int,
-    save_name: str,
-) -> tuple[str, str, str, str]:
-    """
-    Return (summary, slices, residual, mesh) output file paths and ensure directories exist.
-    """
-    summary_dir = "classification_summaries"
-    side_dir = "side-by-sides"
-    residual_dir = "residual_plots"
-    mesh_dir = "marching_cubes_meshes"
-    os.makedirs(summary_dir, exist_ok=True)
-    os.makedirs(side_dir, exist_ok=True)
-    os.makedirs(residual_dir, exist_ok=True)
-    os.makedirs(mesh_dir, exist_ok=True)
-    nx, ny, nz = volume_shape
-    if save_name is not None:
-        stem = save_name
-    else:
-        stem = f"{dataset_name}_{nx}x{ny}x{nz}_circ{circuit_size}"
-    return (
-        f"{summary_dir}/{stem}_classification_summary.png",
-        f"{side_dir}/{stem}_volume_vs_classification_slices.png",
-        f"{residual_dir}/{stem}_classical_minus_isovalue_vs_quantum_ev.png",
-        f"{mesh_dir}/{stem}_marching_cubes_classical_vs_quantum.png",
-    )
-
 
 class QcrankImageTilingPreprocess:
     __slots__ = (
@@ -1082,16 +1025,11 @@ class QcrankImageTilingPreprocess:
         "padded_canvas_pred",
         "all_data_list",
         "all_rec_list",
-        "agg_counts",
         "cm_list",
         "acc_list",
-        "all_correct_vals",
-        "all_incorrect_vals",
-        "all_true_inside_vals",
-        "all_true_outside_vals",
-        "all_classical_minus_iso_vals",
-        "all_quantum_ev_vals",
-        "datapoint_table_payloads",
+        "vals",
+        "subtraction_vals",
+        "quantum_ev",
     )
 
     def __init__(
@@ -1118,18 +1056,13 @@ class QcrankImageTilingPreprocess:
         padded_canvas_pred,
         all_data_list,
         all_rec_list,
-        agg_counts,
         cm_list,
         acc_list,
-        all_correct_vals,
-        all_incorrect_vals,
-        all_true_inside_vals,
-        all_true_outside_vals,
-        all_classical_minus_iso_vals,
-        all_quantum_ev_vals,
-        datapoint_table_payloads,
+        vals,
+        subtraction_vals,
+        quantum_ev,
     ):
-        """Container for volume preprocessing outputs and per-run accumulators."""
+        """Container for volume preprocessing outputs and stitched classification arrays."""
         self.rw = rw
         self.rh = rh
         self.n_tx = n_tx
@@ -1151,16 +1084,11 @@ class QcrankImageTilingPreprocess:
         self.padded_canvas_pred = padded_canvas_pred
         self.all_data_list = all_data_list
         self.all_rec_list = all_rec_list
-        self.agg_counts = agg_counts
         self.cm_list = cm_list
         self.acc_list = acc_list
-        self.all_correct_vals = all_correct_vals
-        self.all_incorrect_vals = all_incorrect_vals
-        self.all_true_inside_vals = all_true_inside_vals
-        self.all_true_outside_vals = all_true_outside_vals
-        self.all_classical_minus_iso_vals = all_classical_minus_iso_vals
-        self.all_quantum_ev_vals = all_quantum_ev_vals
-        self.datapoint_table_payloads = datapoint_table_payloads
+        self.vals = vals
+        self.subtraction_vals = subtraction_vals
+        self.quantum_ev = quantum_ev
 
 
 def prepare_qcrank_ehands_vertex_classification_image(
@@ -1243,16 +1171,11 @@ def prepare_qcrank_ehands_vertex_classification_image(
         padded_canvas_pred=padded_canvas_pred,
         all_data_list=all_data_list,
         all_rec_list=all_rec_list,
-        agg_counts={"0": 0, "1": 0},
         cm_list=[],
         acc_list=[],
-        all_correct_vals=[],
-        all_incorrect_vals=[],
-        all_true_inside_vals=[],
-        all_true_outside_vals=[],
-        all_classical_minus_iso_vals=[],
-        all_quantum_ev_vals=[],
-        datapoint_table_payloads=[],
+        vals=None,
+        subtraction_vals=None,
+        quantum_ev=None,
     )
 
 
@@ -1269,45 +1192,78 @@ def stitch_classification_tiles_into_canvases(pre, tile_width, tile_height, reco
     del tile_width, tile_height, records
 
 
-def build_classification_plot_context(
-    pre,
-    image_path,
-    tile_width,
-    tile_height,
-    image_x_offset,
-    image_y_offset,
+
+CLASSIFICATION_RUNS_DIR = "classification_runs"
+
+
+def classification_run_npz_path(save_stem: str, iteration: int) -> str:
+    """Return `classification_runs/<stem>_iterXX.npz`, creating the directory if needed."""
+    os.makedirs(CLASSIFICATION_RUNS_DIR, exist_ok=True)
+    return os.path.join(
+        CLASSIFICATION_RUNS_DIR, f"{save_stem}_iter{int(iteration):02d}.npz"
+    )
+
+
+def save_classification_run(
+    *,
+    path,
+    volume_orig,
+    region_proc,
+    y_true,
+    y_pred,
+    vals,
+    subtraction_vals,
+    quantum_ev,
+    confusion_matrix,
+    accuracy,
+    isolevel_orig,
+    class_threshold,
+    compose_weight,
+    circuit_size,
+    n_circuits,
+    n_valid,
+    shots_coef,
+    mean_data_rec_err,
+    dataset_name,
+    c_mode,
     save_name,
+    isovalue_mode,
+    iteration,
+    preprocess_s=0.0,
+    classification_s=0.0,
+    postprocess_s=0.0,
 ):
-    """Assemble a plotting context dict from preprocessing outputs and accumulators."""
-    del image_path, image_x_offset, image_y_offset
-    return {
-        "image_path": pre.dataset_name,
-        "dataset_name": pre.dataset_name,
-        "rw": pre.rw,
-        "rh": pre.rh,
-        "tile_width": tile_width,
-        "tile_height": tile_height,
-        "circuit_size": pre.circuit_size,
-        "n_circuits": pre.n_circuits,
-        "volume_shape": pre.volume_shape,
-        "volume_orig": pre.volume_orig,
-        "isolevel_orig": pre.isolevel_orig,
-        "save_name": save_name,
-        "acc_list": pre.acc_list,
-        "cm_list": pre.cm_list,
-        "agg_counts": pre.agg_counts,
-        "all_correct_vals": pre.all_correct_vals,
-        "all_incorrect_vals": pre.all_incorrect_vals,
-        "all_true_inside_vals": pre.all_true_inside_vals,
-        "all_true_outside_vals": pre.all_true_outside_vals,
-        "padded_canvas_gray": pre.padded_canvas_gray,
-        "padded_canvas_true": pre.padded_canvas_true,
-        "padded_canvas_pred": pre.padded_canvas_pred,
-        "image_isovalue_proc": pre.image_isovalue_proc,
-        "n_tiles": pre.n_tiles,
-        "all_classical_minus_iso_vals": pre.all_classical_minus_iso_vals,
-        "all_quantum_ev_vals": pre.all_quantum_ev_vals,
-    }
+    """Persist stitched 3D labels and recovered EVs for offline analysis."""
+    np.savez_compressed(
+        path,
+        volume_orig=np.asarray(volume_orig, dtype=np.float64),
+        region_proc=np.asarray(region_proc, dtype=np.float32),
+        y_true=np.asarray(y_true, dtype=np.int32),
+        y_pred=np.asarray(y_pred, dtype=np.int32),
+        vals=np.asarray(vals, dtype=np.float64).reshape(-1),
+        subtraction_vals=np.asarray(subtraction_vals, dtype=np.float64).reshape(-1),
+        quantum_ev=np.asarray(quantum_ev, dtype=np.float64).reshape(-1),
+        confusion_matrix=np.asarray(confusion_matrix, dtype=np.int32),
+        accuracy=np.float64(accuracy),
+        isolevel_orig=np.float64(isolevel_orig),
+        class_threshold=np.float64(class_threshold),
+        compose_weight=np.float64(compose_weight),
+        circuit_size=np.int32(circuit_size),
+        n_circuits=np.int32(n_circuits),
+        n_valid=np.int32(n_valid),
+        shots_coef=np.int32(shots_coef),
+        mean_data_rec_err=np.float64(mean_data_rec_err),
+        iteration=np.int32(iteration),
+        preprocess_s=np.float64(preprocess_s),
+        classification_s=np.float64(classification_s),
+        postprocess_s=np.float64(postprocess_s),
+        dataset_name=np.asarray(str(dataset_name)),
+        c_mode=np.asarray(str(c_mode)),
+        save_name=np.asarray(str(save_name)),
+        isovalue_mode=np.asarray(str(isovalue_mode)),
+        volume_shape=np.asarray(tuple(int(s) for s in np.asarray(volume_orig).shape), dtype=np.int32),
+    )
+    print(f"Saved classification run to: {path}")
 
 
 # -------------------------------- Test --------------------------------
@@ -1340,7 +1296,6 @@ def test_shot_count_loop_vertex_classification_image_driver(
     hw_submit_only: bool = False,
     hw_results: dict | None = None,
     volumes: dict | None = None,
-    interactive_mesh: bool = True,
 ):
     """Run a shots-coefficient sweep over flattened 3D volume classification.
 
@@ -1387,7 +1342,6 @@ def test_shot_count_loop_vertex_classification_image_driver(
             hw_submit_only=hw_submit_only,
             hw_results=hw_results,
             volumes=volumes,
-            interactive_mesh=interactive_mesh,
         )
         tile_test_csv_rows.extend(rows)
 
@@ -1409,6 +1363,7 @@ def test_shot_count_loop_vertex_classification_image_driver(
         "avg_postprocess_s",
         "avg_total_s",
         "total_time_5iter_s",
+        "run_npz",
     ]
     with open(results_path, "w", encoding="utf-8", newline="") as rf:
         writer = csv.DictWriter(rf, fieldnames=fieldnames)
@@ -1446,17 +1401,13 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
     hw_submit_only: bool = False,
     hw_results: dict | None = None,
     volumes: dict | None = None,
-    interactive_mesh: bool = True,
 ):
-    """Run a circuit-size sweep over flattened 3D volumes and emit plots/CSV per configuration."""
+    """Run a circuit-size sweep over flattened 3D volumes and save stitched run data."""
     volumes = volumes if volumes is not None else build_3d_volume_datasets()
     base_save = save_name if save_name is not None else "volume3d"
     last_tile_size_mean_accuracy = 0.0
     tile_test_csv_rows: list[dict[str, object]] = []
     submitted_job_ids: list[str] = []
-
-    test_classical_minus_iso_vals: list[np.ndarray] = []
-    test_quantum_ev_vals: list[np.ndarray] = []
 
     jobs: list[tuple[str, np.ndarray, int]] = []
     for dataset_name, volume in volumes.items():
@@ -1476,10 +1427,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         total_postprocess_time = 0.0
         total_mean_data_rec_err = 0.0
         mean_accuracy_per_iteration: list[float] = []
-
-        # Per-tile-size accumulators across all iterations of this tile size.
-        size_classical_minus_iso_vals: list[np.ndarray] = []
-        size_quantum_ev_vals: list[np.ndarray] = []
+        run_npz_paths: list[str] = []
 
         tile_aborted = False
         for i in range(iterations):
@@ -1548,73 +1496,38 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 ############## POSTPROCESS SECTION ##############
                 postprocess_start_time = time.time()
                 stitch_classification_tiles_into_canvases(pre, tw, th, stitch_records)
-                plot_ctx = build_classification_plot_context(
-                    pre,
-                    image_path,
-                    tw,
-                    th,
-                    image_x_offset,
-                    image_y_offset,
-                    run_save_name,
-                )
+                run_npz = classification_run_npz_path(run_save_name, i + 1)
                 postprocess_end_time = time.time()
                 postprocess_time = postprocess_end_time - postprocess_start_time
-
-                ############## PLOT SECTION ##############
-                print_datapoint_classification_tables_if_any(pre)
-
-                summary_out, side_by_side_out, _, mesh_out = classification_output_paths(
-                    plot_ctx["dataset_name"],
-                    plot_ctx["volume_shape"],
-                    plot_ctx["circuit_size"],
-                    plot_ctx["save_name"],
+                save_classification_run(
+                    path=run_npz,
+                    volume_orig=pre.volume_orig,
+                    region_proc=pre.region_proc,
+                    y_true=pre.padded_canvas_true,
+                    y_pred=pre.padded_canvas_pred,
+                    vals=pre.vals,
+                    subtraction_vals=pre.subtraction_vals,
+                    quantum_ev=pre.quantum_ev,
+                    confusion_matrix=pre.cm_list[-1],
+                    accuracy=pre.acc_list[-1],
+                    isolevel_orig=pre.isolevel_orig,
+                    class_threshold=pre.class_threshold,
+                    compose_weight=pre.compose_weight,
+                    circuit_size=pre.circuit_size,
+                    n_circuits=pre.n_circuits,
+                    n_valid=pre.n_valid,
+                    shots_coef=hw_tile_data["shots_coef_k"] if hw_tile_data else sc,
+                    mean_data_rec_err=mean_data_rec_err,
+                    dataset_name=pre.dataset_name,
+                    c_mode=c_mode,
+                    save_name=run_save_name,
+                    isovalue_mode=isovalue_mode,
+                    iteration=i + 1,
+                    preprocess_s=preprocess_time,
+                    classification_s=classification_time,
+                    postprocess_s=postprocess_time,
                 )
-
-                print(f"Saving classification summary to: {summary_out}")
-                print(f"Saving slice figure to: {side_by_side_out}")
-                mean_accuracy = plot_classification_summary_figure(
-                    region_width=plot_ctx["volume_shape"][0],
-                    region_height=plot_ctx["volume_shape"][1],
-                    tile_width=plot_ctx["circuit_size"],
-                    tile_height=1,
-                    acc_list=plot_ctx["acc_list"],
-                    cm_list=plot_ctx["cm_list"],
-                    agg_counts=plot_ctx["agg_counts"],
-                    all_correct_vals=plot_ctx["all_correct_vals"],
-                    all_incorrect_vals=plot_ctx["all_incorrect_vals"],
-                    all_true_inside_vals=plot_ctx["all_true_inside_vals"],
-                    all_true_outside_vals=plot_ctx["all_true_outside_vals"],
-                    out_name=summary_out,
-                    bins=20,
-                    volume_shape=plot_ctx["volume_shape"],
-                    n_circuits=plot_ctx["n_circuits"],
-                    dataset_name=plot_ctx["dataset_name"],
-                )
-
-                if c_mode == "1":
-                    input_value_range = (-1.0, 1.0)
-                else:
-                    input_value_range = (0.0, 1.0)
-                plot_volume_slices_vs_classification(
-                    plot_ctx["padded_canvas_gray"],
-                    plot_ctx["padded_canvas_true"],
-                    plot_ctx["padded_canvas_pred"],
-                    out_name=side_by_side_out,
-                    input_value_range=input_value_range,
-                    dataset_name=plot_ctx["dataset_name"],
-                )
-                plot_marching_cubes_classical_vs_quantum(
-                    volume=plot_ctx["volume_orig"],
-                    isolevel=plot_ctx["isolevel_orig"],
-                    true_classes=plot_ctx["padded_canvas_true"],
-                    pred_classes=plot_ctx["padded_canvas_pred"],
-                    out_name=mesh_out,
-                    dataset_name=plot_ctx["dataset_name"],
-                    interactive=interactive_mesh,
-                )
-
-                size_classical_minus_iso_vals.extend(plot_ctx["all_classical_minus_iso_vals"])
-                size_quantum_ev_vals.extend(plot_ctx["all_quantum_ev_vals"])
+                run_npz_paths.append(run_npz)
 
                 ############## SUMMARY ##############
 
@@ -1622,6 +1535,7 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 total_preprocess_time += preprocess_time
                 total_classification_time += classification_time
                 total_postprocess_time += postprocess_time
+                mean_accuracy = float(pre.acc_list[-1]) if pre.acc_list else 0.0
                 mean_accuracy_per_iteration.append(float(mean_accuracy))
                 total_mean_data_rec_err += mean_data_rec_err
 
@@ -1728,45 +1642,9 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
                 "avg_postprocess_s": round(average_postprocess_time, 2),
                 "avg_total_s": round(average_total_time, 2),
                 "total_time_5iter_s": round(overall_total_time, 2),
+                "run_npz": ";".join(run_npz_paths),
             }
         )
-
-        # Per-tile-size residual plot: aggregates across all iterations for this tile size.
-        size_residual_dir = "residual_plots"
-        os.makedirs(size_residual_dir, exist_ok=True)
-        size_residual_out = (
-            f"{size_residual_dir}/{base_save}_{dataset_name}_sc{sc}_circ{tw}"
-            f"_classical_minus_isovalue_vs_quantum_ev.png"
-        )
-        if ni > 0 and size_classical_minus_iso_vals:
-            try:
-                n_classical = sum(np.asarray(a).size for a in size_classical_minus_iso_vals)
-                n_quantum = sum(np.asarray(a).size for a in size_quantum_ev_vals)
-                print(
-                    f"\n[k={sc}] {dataset_name} circuit_size={tw} aggregated residual plot inputs: "
-                    f"classical points={n_classical}, quantum points={n_quantum}, "
-                    f"chunks={len(size_classical_minus_iso_vals)} (over {ni} completed iterations)"
-                )
-                plot_classical_minus_isovalue_vs_quantum_ev(
-                    all_classical_minus_iso_vals=size_classical_minus_iso_vals,
-                    all_quantum_ev_vals=size_quantum_ev_vals,
-                    out_name=size_residual_out,
-                )
-            except Exception as exc:
-                import traceback
-
-                print(f"!!! Residual plot generation failed for {size_residual_out}: {exc}")
-                traceback.print_exc()
-        elif ni == 0:
-            print(
-                f"\n[k={sc}] {dataset_name} circuit_size={tw}: skipping residual plot "
-                f"(no completed iterations)."
-            )
-
-        # Roll this tile size's data into the test-level accumulators.
-        if ni > 0:
-            test_classical_minus_iso_vals.extend(size_classical_minus_iso_vals)
-            test_quantum_ev_vals.extend(size_quantum_ev_vals)
 
     if submitted_job_ids:
         print(f"\nAll hardware jobs submitted ({len(submitted_job_ids)} total):")
@@ -1791,38 +1669,18 @@ def test_tile_size_iteration_loop_vertex_classification_image_driver(
         "avg_postprocess_s",
         "avg_total_s",
         "total_time_5iter_s",
+        "run_npz",
     ]
     with open(results_path, "w", encoding="utf-8", newline="") as rf:
         writer = csv.DictWriter(rf, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(tile_test_csv_rows)
     print(f"\nWrote per-tile-size summary to: {results_path}")
-
-    # Aggregated tile-test residual plot covering every tile size and iteration in this run.
-    test_residual_dir = "residual_plots"
-    os.makedirs(test_residual_dir, exist_ok=True)
-    test_residual_out = (
-        f"{test_residual_dir}/{base_save}_sc{sc}_tile-test"
-        f"_classical_minus_isovalue_vs_quantum_ev.png"
+    print(
+        "Classification data saved under classification_runs/. "
+        "Run ehands_qcrank_vertex_classification_V2_analysis.py to generate charts "
+        "and error analysis without re-executing circuits."
     )
-    try:
-        n_classical = sum(np.asarray(a).size for a in test_classical_minus_iso_vals)
-        n_quantum = sum(np.asarray(a).size for a in test_quantum_ev_vals)
-        print(
-            f"\nTile-test aggregated residual plot inputs: "
-            f"classical points={n_classical}, quantum points={n_quantum}, "
-            f"chunks={len(test_classical_minus_iso_vals)} "
-            f"(over {len(tile_sizes)} tile sizes x {iterations} iterations)"
-        )
-        plot_classical_minus_isovalue_vs_quantum_ev(
-            all_classical_minus_iso_vals=test_classical_minus_iso_vals,
-            all_quantum_ev_vals=test_quantum_ev_vals,
-            out_name=test_residual_out,
-        )
-    except Exception as exc:
-        import traceback
-        print(f"!!! Tile-test residual plot generation failed for {test_residual_out}: {exc}")
-        traceback.print_exc()
 
     return last_tile_size_mean_accuracy, tile_test_csv_rows
 
@@ -1854,7 +1712,6 @@ def qcrank_ehands_vertex_classification_image_driver(
     hw_submit_only: bool = False,
     hw_results: dict | None = None,
     volumes: dict | None = None,
-    interactive_mesh: bool = True,
 ):
     """
     Top-level driver for 3D volume classification (flatten to 1D, partition into circuits).
@@ -1896,7 +1753,6 @@ def qcrank_ehands_vertex_classification_image_driver(
         hw_seed_transpiler=hw_seed_transpiler,
         hw_submit_only=hw_submit_only,
         volumes=volumes,
-        interactive_mesh=interactive_mesh,
     )
 
 def qcrank_ehands_vertex_classification_image(
@@ -1942,8 +1798,8 @@ def qcrank_ehands_vertex_classification_image(
     pre.n_tiles = pre.n_circuits
     pre.n_valid = int(vc.di.n_valid)
     print(
-        f"Flattened {pre.dataset_name} {pre.volume_shape} → {pre.n_valid} samples, "
-        f"{pre.n_circuits} circuits × {circuit_size} addresses "
+        f"Flattened {pre.dataset_name} {pre.volume_shape} -> {pre.n_valid} samples, "
+        f"{pre.n_circuits} circuits x {circuit_size} addresses "
         f"(nq_addr={vc.di.nq_addr})"
     )
     print(f"Total circuits in batch: {len(all_circuits)}")
@@ -2006,39 +1862,12 @@ def qcrank_ehands_vertex_classification_image(
     quantum_ev_vals = packed_circuits_to_1d(
         np.asarray(pre.all_rec_list[0][-1])[:, 0, :], n_valid=pre.n_valid
     )
-
-    pre.all_quantum_ev_vals.append(np.asarray(quantum_ev_vals).reshape(-1))
-    pre.all_classical_minus_iso_vals.append(np.asarray(subtraction_vals).reshape(-1))
-
     y_t = np.asarray(comp["y_true"]).reshape(-1)
     y_p = np.asarray(comp["y_pred"]).reshape(-1)
-    sub = np.asarray(subtraction_vals).reshape(-1)
-    correct_mask = y_t == y_p
-    incorrect_mask = ~correct_mask
-    true_inside_mask = y_t == 0
-    true_outside_mask = y_t == 1
 
-    if np.any(true_inside_mask):
-        pre.all_true_inside_vals.append(sub[true_inside_mask])
-    if np.any(true_outside_mask):
-        pre.all_true_outside_vals.append(sub[true_outside_mask])
-    if np.any(correct_mask):
-        pre.all_correct_vals.append(sub[correct_mask])
-    if np.any(incorrect_mask):
-        pre.all_incorrect_vals.append(sub[incorrect_mask])
-
-    if pre.n_valid <= 64:
-        pre.datapoint_table_payloads.append(
-            {
-                "data_vals": np.asarray(data_vals, dtype=np.float32).copy(),
-                "subtraction_vals": np.asarray(subtraction_vals, dtype=np.float32).copy(),
-                "y_true": np.asarray(comp["y_true"]).copy(),
-                "y_pred": np.asarray(comp["y_pred"]).copy(),
-            }
-        )
-
-    pre.agg_counts["0"] += int(np.sum(y_p == 0))
-    pre.agg_counts["1"] += int(np.sum(y_p == 1))
+    pre.vals = data_vals
+    pre.subtraction_vals = subtraction_vals
+    pre.quantum_ev = np.asarray(quantum_ev_vals).reshape(-1)
 
     shape = pre.volume_shape
     pre.padded_canvas_gray = np.asarray(pre.region_proc, dtype=np.float32)
@@ -2049,739 +1878,15 @@ def qcrank_ehands_vertex_classification_image(
     return pre.all_rec_list, pre.all_data_list, pre, stitch_records, mean_data_rec_err
 
 
-# -------------------------------- Plots --------------------------------
-# Credit to CursorAI for the following plot functions
-
-def plot_full_image_vs_classification(
-    input_image,
-    true_image,
-    predicted_image,
-    out_name,
-    *,
-    input_value_range=(-1.0, 1.0),
-    region_size_hw=None,
-):
-    """
-    Plot input grayscale, true classes, and predicted classes side-by-side to `out_name`.
-    
-    Credit to CursorAI for the following code.
-    """
-    font_size_delta = 5
-    input_image = np.asarray(input_image, dtype=np.float32)
-    true_image = np.asarray(true_image, dtype=np.int32)
-    predicted_image = np.asarray(predicted_image, dtype=np.int32)
-    h, w = input_image.shape
-    fig_w = min(22.0, max(10.0, w / 32.0 + 4.0))
-    fig_h = min(14.0, max(5.0, h / 32.0 + 2.0))
-    fig, axes = plt.subplots(1, 3, figsize=(1.65 * fig_w, fig_h))
-
-    ax_input, ax_true, ax_pred = axes
-    in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
-    im0 = ax_input.imshow(
-        input_image, cmap="gray", vmin=in_vmin, vmax=in_vmax, origin="upper", zorder=1
-    )
-
-    n_pad = 0
-    if region_size_hw is not None:
-        rh_i, rw_i = int(region_size_hw[0]), int(region_size_hw[1])
-        cy = np.arange(h)[:, np.newaxis]
-        cx = np.arange(w)[np.newaxis, :]
-        pad_mask = (cy >= rh_i) | (cx >= rw_i)
-        n_pad = int(np.sum(pad_mask))
-        if n_pad > 0:
-            for ax in (ax_input, ax_true, ax_pred):
-                ov = np.zeros((h, w, 4), dtype=np.float32)
-                ov[pad_mask] = (0.95, 0.15, 0.65, 0.55)
-                ax.imshow(ov, origin="upper", interpolation="nearest", zorder=2)
-            ax_input.set_title("Input Image Grayscale (magenta = padded band, -1)")
-        else:
-            ax_input.set_title(
-                "Input Image Grayscale"
-            )
-    else:
-        ax_input.set_title("Input Image Grayscale (full region)")
-    ax_input.set_xlabel("x")
-    ax_input.set_ylabel("y")
-    # Keep subplot widths symmetric by attaching the colorbar inside the first panel.
-    cax0 = ax_input.inset_axes([1.02, 0.08, 0.025, 0.84])
-    cbar0 = fig.colorbar(
-        im0,
-        cax=cax0,
-        ticks=[in_vmin, 0.5 * (in_vmin + in_vmax), in_vmax],
-    )
-    cbar0.set_ticklabels([f"{in_vmin:g}", f"{0.5 * (in_vmin + in_vmax):g}", f"{in_vmax:g}"])
-    for tick in cbar0.ax.get_yticklabels():
-        tick.set_fontsize(tick.get_fontsize() + font_size_delta)
-
-    ax_true.imshow(
-        true_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
-    )
-    if region_size_hw is not None:
-        if n_pad > 0:
-            ax_true.set_title("Classical Classifications (magenta = padded band)")
-        else:
-            ax_true.set_title("Classical Classifications")
-    else:
-        ax_true.set_title("Classical Classifications")
-    ax_true.set_xlabel("x")
-    ax_true.set_ylabel("y")
-    cmap = plt.get_cmap("viridis_r")
-    ax_true.legend(
-        handles=[
-            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
-            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
-        ],
-        loc="upper right",
-        framealpha=0.95,
-    )
-
-    im1 = ax_pred.imshow(
-        predicted_image, cmap="viridis_r", vmin=0, vmax=1, origin="upper", zorder=1
-    )
-    if region_size_hw is not None:
-        if n_pad > 0:
-            ax_pred.set_title("Quantum Classifications (magenta = padded band)")
-        else:
-            ax_pred.set_title("Quantum Classifications")
-    else:
-        ax_pred.set_title("Quantum Classifications")
-    ax_pred.set_xlabel("x")
-    ax_pred.set_ylabel("y")
-    ax_pred.legend(
-        handles=[
-            Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside"),
-            Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside"),
-        ],
-        loc="upper right",
-        framealpha=0.95,
-    )
-
-    xt = axis_ticks(w)
-    yt = axis_ticks(h)
-    for ax in (ax_input, ax_true, ax_pred):
-        ax.set_xticks(xt)
-        ax.set_yticks(yt)
-        increase_axis_text_size(ax, delta_points=font_size_delta)
-
-    fig.tight_layout()
-
-    fig.savefig(out_name, bbox_inches="tight", dpi=150)
-    print(f"Saved full image vs classification plot to: {out_name}")
-    plt.close(fig)
-
-
-def _midplane(volume, axis):
-    vol = np.asarray(volume)
-    idx = vol.shape[axis] // 2
-    return np.take(vol, idx, axis=axis), idx
-
-
-def plot_volume_slices_vs_classification(
-    input_volume,
-    true_volume,
-    predicted_volume,
-    out_name,
-    *,
-    input_value_range=(-1.0, 1.0),
-    dataset_name="volume",
-):
-    """Plot mid-plane slices (xy, xz, yz) of input, classical labels, and quantum labels."""
-    input_volume = np.asarray(input_volume, dtype=np.float32)
-    true_volume = np.asarray(true_volume, dtype=np.int32)
-    predicted_volume = np.asarray(predicted_volume, dtype=np.int32)
-    in_vmin, in_vmax = float(input_value_range[0]), float(input_value_range[1])
-    cmap = plt.get_cmap("viridis_r")
-    plane_axes = ((2, "xy"), (1, "xz"), (0, "yz"))
-
-    fig, axes = plt.subplots(3, 3, figsize=(12.5, 11.5))
-    for row, (axis, name) in enumerate(plane_axes):
-        inp, idx = _midplane(input_volume, axis)
-        tru, _ = _midplane(true_volume, axis)
-        pred, _ = _midplane(predicted_volume, axis)
-        im0 = axes[row, 0].imshow(inp.T, cmap="gray", vmin=in_vmin, vmax=in_vmax, origin="lower")
-        axes[row, 1].imshow(tru.T, cmap="viridis_r", vmin=0, vmax=1, origin="lower")
-        axes[row, 2].imshow(pred.T, cmap="viridis_r", vmin=0, vmax=1, origin="lower")
-        axes[row, 0].set_title(f"{dataset_name} input  {name} mid ({idx})")
-        axes[row, 1].set_title(f"Classical  {name}")
-        axes[row, 2].set_title(f"Quantum  {name}")
-        for ax in axes[row]:
-            ax.set_xlabel("i")
-            ax.set_ylabel("j")
-        cax = axes[row, 0].inset_axes([1.02, 0.08, 0.04, 0.84])
-        fig.colorbar(im0, cax=cax)
-
-    handles = [
-        Patch(facecolor=cmap(0.0), edgecolor="black", label="Inside (class 0)"),
-        Patch(facecolor=cmap(1.0), edgecolor="black", label="Outside (class 1)"),
-    ]
-    axes[0, 1].legend(handles=handles, loc="upper right", framealpha=0.95)
-    fig.tight_layout()
-    fig.savefig(out_name, bbox_inches="tight", dpi=150)
-    print(f"Saved volume slice classification plot to: {out_name}")
-    plt.close(fig)
-
-
-def _mesh_stats(poly):
-    n_points = int(poly.GetNumberOfPoints()) if poly is not None else 0
-    n_tris = int(poly.GetNumberOfPolys()) if poly is not None else 0
-    return n_points, n_tris
-
-
-def _vtk_mesh_actor(polydata, color=(0.35, 0.72, 0.95), wireframe=False):
-    mapper = vtk.vtkPolyDataMapper()
-    mapper.SetInputData(polydata)
-    mapper.ScalarVisibilityOff()
-    actor = vtk.vtkActor()
-    actor.SetMapper(mapper)
-    actor.GetProperty().SetColor(*color)
-    if wireframe:
-        actor.GetProperty().SetRepresentationToWireframe()
-        actor.GetProperty().SetLineWidth(1.0)
-        actor.GetProperty().SetAmbient(1.0)
-        actor.GetProperty().SetDiffuse(0.0)
-    else:
-        actor.GetProperty().SetInterpolationToPhong()
-        actor.GetProperty().SetAmbient(0.22)
-        actor.GetProperty().SetDiffuse(0.72)
-        actor.GetProperty().SetSpecular(0.4)
-        actor.GetProperty().SetSpecularPower(28)
-    return actor
-
-
-def _vtk_outline_actor(nx, ny, nz):
-    source = vtk.vtkCubeSource()
-    source.SetBounds(0, nx - 1, 0, ny - 1, 0, nz - 1)
-    outline = vtk.vtkOutlineFilter()
-    outline.SetInputConnection(source.GetOutputPort())
-    mapper = vtk.vtkPolyDataMapper()
-    mapper.SetInputConnection(outline.GetOutputPort())
-    actor = vtk.vtkActor()
-    actor.SetMapper(mapper)
-    actor.GetProperty().SetColor(0.85, 0.85, 0.85)
-    actor.GetProperty().SetLineWidth(1.5)
-    return actor
-
-
-def _vtk_text_actor(text, x, y):
-    actor = vtk.vtkTextActor()
-    actor.SetInput(text)
-    prop = actor.GetTextProperty()
-    prop.SetFontSize(16)
-    prop.SetBold(1)
-    prop.SetColor(1.0, 1.0, 1.0)
-    actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-    actor.SetPosition(x, y)
-    return actor
-
-
-def _vtk_rgb_screenshot(render_window):
-    render_window.Render()
-    w2if = vtk.vtkWindowToImageFilter()
-    w2if.SetInput(render_window)
-    w2if.SetInputBufferTypeToRGB()
-    w2if.ReadFrontBufferOff()
-    w2if.Update()
-    vtk_img = w2if.GetOutput()
-    width, height, _ = vtk_img.GetDimensions()
-    rgb = vtk_to_numpy(vtk_img.GetPointData().GetScalars()).reshape(height, width, 3)
-    return np.ascontiguousarray(np.flipud(rgb))
-
-
-def plot_marching_cubes_classical_vs_quantum(
-    volume,
-    isolevel,
-    true_classes,
-    pred_classes,
-    out_name,
-    dataset_name="volume",
-    interactive=True,
-):
-    """Extract labeled marching cubes and save a PNG; optionally open a rotatable VTK window."""
-    if not _VTK_MC_AVAILABLE:
-        print("Skipping marching-cubes figure (VTK / labeled extension not available).")
-        return
-
-    volume = np.ascontiguousarray(np.asarray(volume, dtype=np.float64))
-    true_labels = quantum_classes_to_mc_labels(true_classes, volume.shape)
-    pred_labels = quantum_classes_to_mc_labels(pred_classes, volume.shape)
-    classical_mesh = _marching_cubes(volume, float(isolevel), classified=true_labels)
-    quantum_mesh = _marching_cubes(volume, float(isolevel), classified=pred_labels)
-    n_pts_c, n_tris_c = _mesh_stats(classical_mesh)
-    n_pts_q, n_tris_q = _mesh_stats(quantum_mesh)
-    print(
-        f"{dataset_name} marching cubes @ isolevel={isolevel:.4f}: "
-        f"classical {n_pts_c} pts / {n_tris_c} tris, "
-        f"quantum {n_pts_q} pts / {n_tris_q} tris"
-    )
-
-    nx, ny, nz = volume.shape
-    camera = vtk.vtkCamera()
-    camera.SetViewUp(0, 0, 1)
-    camera.SetPosition(nx * 2.4, ny * -2.1, nz * 1.8)
-    camera.SetFocalPoint((nx - 1) / 2.0, (ny - 1) / 2.0, (nz - 1) / 2.0)
-
-    ren_left = vtk.vtkRenderer()
-    ren_left.SetViewport(0.0, 0.0, 0.5, 1.0)
-    ren_left.SetBackground(0.12, 0.12, 0.14)
-    ren_left.SetActiveCamera(camera)
-    ren_left.AddActor(_vtk_mesh_actor(classical_mesh))
-    if n_tris_c:
-        ren_left.AddActor(_vtk_mesh_actor(classical_mesh, color=(0.08, 0.18, 0.28), wireframe=True))
-    ren_left.AddActor(_vtk_outline_actor(nx, ny, nz))
-    ren_left.AddActor(_vtk_text_actor(f"{dataset_name} — classical MC ({n_tris_c} tris)", 0.04, 0.93))
-
-    ren_right = vtk.vtkRenderer()
-    ren_right.SetViewport(0.5, 0.0, 1.0, 1.0)
-    ren_right.SetBackground(0.12, 0.12, 0.14)
-    ren_right.SetActiveCamera(camera)
-    ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, color=(0.95, 0.62, 0.28)))
-    if n_tris_q:
-        ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, color=(0.28, 0.12, 0.04), wireframe=True))
-    ren_right.AddActor(_vtk_outline_actor(nx, ny, nz))
-    ren_right.AddActor(_vtk_text_actor(f"quantum MC ({n_tris_q} tris)", 0.04, 0.93))
-
-    render_window = vtk.vtkRenderWindow()
-    render_window.AddRenderer(ren_left)
-    render_window.AddRenderer(ren_right)
-    render_window.SetSize(1100, 520)
-    render_window.SetWindowName(f"{dataset_name} marching cubes (classical | quantum)")
-    camera.OrthogonalizeViewUp()
-    ren_left.ResetCameraClippingRange()
-    ren_right.ResetCameraClippingRange()
-
-    if interactive:
-        render_window.SetOffScreenRendering(0)
-    else:
-        render_window.SetOffScreenRendering(1)
-
-    rgb = _vtk_rgb_screenshot(render_window)
-    fig, ax = plt.subplots(figsize=(11, 5.2))
-    ax.imshow(rgb)
-    ax.set_axis_off()
-    ax.set_title(
-        f"{dataset_name}  |  isolevel={isolevel:.3f}  |  "
-        f"classical {n_tris_c} tris vs quantum {n_tris_q} tris"
-    )
-    fig.tight_layout()
-    fig.savefig(out_name, bbox_inches="tight", dpi=150)
-    print(f"Saved marching-cubes comparison to: {out_name}")
-    plt.close(fig)
-
-    if interactive:
-        print(
-            f"Interactive mesh for {dataset_name}: left-drag rotate, scroll zoom, "
-            "middle-drag pan. Close the VTK window to continue."
-        )
-        interactor = vtk.vtkRenderWindowInteractor()
-        interactor.SetRenderWindow(render_window)
-        style = vtk.vtkInteractorStyleTrackballCamera()
-        interactor.SetInteractorStyle(style)
-        render_window.Render()
-        interactor.Initialize()
-        interactor.Start()
-
-
-def axis_ticks(n, step=10):
-    """
-    Compute simple integer tick marks for an axis of length `n`.
-    
-    Credit to CursorAI for the following code.
-    """
-    if n <= 0:
-        return np.array([], dtype=int)
-    return np.asarray(list(range(0, n, step)), dtype=int)
-
-
-def increase_axis_text_size(ax, delta_points=5):
-    """
-    Increase title/label/tick/legend font sizes for a matplotlib axis.
-    
-    Credit to CursorAI for the following code.
-    """
-    ax.title.set_fontsize(ax.title.get_fontsize() + delta_points)
-    ax.xaxis.label.set_fontsize(ax.xaxis.label.get_fontsize() + delta_points)
-    ax.yaxis.label.set_fontsize(ax.yaxis.label.get_fontsize() + delta_points)
-
-    for tick in ax.get_xticklabels() + ax.get_yticklabels():
-        tick.set_fontsize(tick.get_fontsize() + delta_points)
-
-    legend = ax.get_legend()
-    if legend is not None:
-        for text in legend.get_texts():
-            text.set_fontsize(text.get_fontsize() + delta_points)
-        legend_title = legend.get_title()
-        if legend_title is not None:
-            legend_title.set_fontsize(legend_title.get_fontsize() + delta_points)
-
-    for text in ax.texts:
-        text.set_fontsize(text.get_fontsize() + delta_points)
-
-def plot_correct_incorrect_input_histogram(all_correct_vals, all_incorrect_vals, bins=20, ax=None):
-    """
-    Plot histograms of weighted subtraction values for correct vs incorrect predictions.
-    
-    Credit to CursorAI for the following code.
-    """
-    if ax is None:
-        ax = plt.gca()
-
-    if not (all_correct_vals or all_incorrect_vals):
-        ax.set_title("Quantum Classification: correct vs incorrect classifications")
-        ax.text(0.5, 0.5, "No data", ha="center", va="center")
-        ax.axis("off")
-        return
-
-    concat_correct = (
-        np.concatenate(all_correct_vals) if all_correct_vals else np.array([])
-    )
-    concat_incorrect = (
-        np.concatenate(all_incorrect_vals) if all_incorrect_vals else np.array([])
-    )
-
-    parts = [a for a in (concat_correct, concat_incorrect) if a.size]
-    bin_edges = np.histogram_bin_edges(np.concatenate(parts), bins=bins)
-
-    if concat_correct.size:
-        ax.hist(concat_correct, bins=bin_edges, alpha=0.6, label="Correct", color="tab:blue")
-    if concat_incorrect.size:
-        ax.hist(concat_incorrect, bins=bin_edges, alpha=0.6, label="Incorrect", color="tab:orange")
-
-    ax.set_xlabel("Input data value after weighted subtraction")
-    ax.set_ylabel("Number of Samples")
-    ax.set_title("Quantum Classification: correct vs incorrect classifications")
-    ax.legend()
-
-
-def plot_aggregated_confusion_matrix(total_cm, title="Aggregated Confusion Matrix", ax=None):
-    """
-    Render an aggregated 2x2 confusion matrix with color-coded diagonal/off-diagonal.
-    
-    Credit to CursorAI for the following code.
-    """
-    if ax is None:
-        ax = plt.gca()
-
-    total_cm = np.asarray(total_cm, dtype=float)
-    cmap_blue = plt.colormaps["Blues"]
-    cmap_orange = plt.colormaps["Oranges"]
-
-    diag_max = max(total_cm[0, 0], total_cm[1, 1])
-    if diag_max <= 0:
-        diag_max = 1.0
-    rgba = np.zeros((2, 2, 4), dtype=np.float64)
-    for i in range(2):
-        for j in range(2):
-            val = total_cm[i, j]
-            if i == j:
-                t = val / diag_max
-                rgba[i, j] = cmap_blue(0.22 + 0.73 * t)
-            else:
-                t = val / diag_max
-                rgba[i, j] = cmap_orange(0.28 + 0.67 * t)
-
-    ax.imshow(rgba, interpolation="nearest")
-    ax.set_title(title, fontsize=10)
-
-    tick_marks = np.arange(2)
-    ax.set_xticks(tick_marks)
-    ax.set_xticklabels(["Pred Inside", "Pred Outside"])
-    ax.set_yticks(tick_marks)
-    ax.set_yticklabels(["True Inside", "True Outside"])
-    ax.set_xlabel("Predicted Class")
-    ax.set_ylabel("True Class")
-
-    for i in range(2):
-        for j in range(2):
-            val = int(total_cm[i, j])
-            r, g, b, _ = rgba[i, j]
-            luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
-            ax.text(
-                j,
-                i,
-                val,
-                ha="center",
-                va="center",
-                color=("black" if luminance > 0.6 else "white"),
-            )
-
-
-def plot_aggregated_predicted_class_counts(agg_counts, ax=None):
-    """
-    Plot total predicted class counts (class 0 vs 1).
-    
-    Credit to CursorAI for the following code.
-    """
-    if ax is None:
-        ax = plt.gca()
-
-    labels = ["0", "1"]
-    values = [agg_counts["0"], agg_counts["1"]]
-    ax.bar(labels, values, color=["tab:blue", "tab:orange"])
-    ax.set_xlabel("Predicted class (final bit)")
-    ax.set_ylabel("Number of Samples")
-    ax.set_title("Aggregated Predicted Class Counts")
-
-
-def plot_true_class_input_histogram(all_true_inside_vals, all_true_outside_vals, bins=20, ax=None):
-    """
-    Plot histogram of true-class weighted subtraction values (classical baseline).
-    
-    Credit to CursorAI for the following code.
-    """
-    if ax is None:
-        ax = plt.gca()
-
-    if not (all_true_inside_vals or all_true_outside_vals):
-        ax.set_title("True input data distribution")
-        ax.text(0.5, 0.5, "No data", ha="center", va="center")
-        ax.axis("off")
-        return
-
-    concat_true_inside = np.concatenate(all_true_inside_vals) if all_true_inside_vals else np.array([])
-    concat_true_outside = np.concatenate(all_true_outside_vals) if all_true_outside_vals else np.array([])
-    all_true_vals = np.concatenate([a for a in (concat_true_inside, concat_true_outside) if a.size])
-    bin_edges = np.histogram_bin_edges(all_true_vals, bins=bins)
-
-    ax.hist(
-        all_true_vals,
-        bins=bin_edges,
-        alpha=0.75,
-        color="tab:blue",
-    )
-
-    ax.set_xlabel("Input data value after weighted subtraction")
-    ax.set_ylabel("Number of Samples")
-    ax.set_title("Classical Classification")
-
-
-def print_per_datapoint_classification_table(data_vals, subtraction_vals, y_true, y_pred):
-    """
-    Print a per-datapoint ASCII table and return (correct_vals, incorrect_vals) arrays.
-    
-    Credit to CursorAI for the following code.
-    """
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_pred).reshape(-1)
-    data_vals = np.asarray(data_vals).reshape(-1)
-    subtraction_vals = np.asarray(subtraction_vals).reshape(-1)
-
-    print("\nPer-data-point classifications")
-    print("+--------+---------------+------------------+--------------+----------------+")
-    print("| Index  | Input Value   | Subtraction Vals | True Class   | Pred Class     |")
-    print("+--------+---------------+------------------+--------------+----------------+")
-    for idx, (val, sub_val, y_t, y_p) in enumerate(
-        zip(data_vals, subtraction_vals, y_true, y_pred)
-    ):
-        print(f"| {idx:<6d} | {val:<13.6f} | {sub_val:<16.6f} | {int(y_t):<12d} | {int(y_p):<14d} |")
-    print("+--------+---------------+------------------+--------------+----------------+")
-
-    correct_mask = y_true == y_pred
-    incorrect_mask = ~correct_mask
-
-    correct_vals = subtraction_vals[correct_mask] if np.any(correct_mask) else None
-    incorrect_vals = subtraction_vals[incorrect_mask] if np.any(incorrect_mask) else None
-
-    if correct_vals is not None:
-        print(
-            "Correct classifications value range: "
-            f"[{correct_vals.min():.6f}, {correct_vals.max():.6f}]"
-        )
-    else:
-        print("No correct classifications in this run.")
-
-    if incorrect_vals is not None:
-        print(
-            "Incorrect classifications value range: "
-            f"[{incorrect_vals.min():.6f}, {incorrect_vals.max():.6f}]"
-        )
-    else:
-        print("No incorrect classifications in this run.")
-
-    return correct_vals, incorrect_vals
-
-
-def print_datapoint_classification_tables_if_any(pre):
-    """
-    Print any captured per-datapoint tables stored on `pre` (typically first tile only).
-    
-    Credit to CursorAI for the following code.
-    """
-    for payload in pre.datapoint_table_payloads:
-        print_per_datapoint_classification_table(**payload)
-
-
-def plot_classification_summary_figure(
-    region_width,
-    region_height,
-    tile_width,
-    tile_height,
-    acc_list,
-    cm_list,
-    agg_counts,
-    all_correct_vals,
-    all_incorrect_vals,
-    all_true_inside_vals,
-    all_true_outside_vals,
-    out_name,
-    bins=20,
-    volume_shape=None,
-    n_circuits=None,
-    dataset_name=None,
-):
-    """
-    Create and save the 3-panel summary figure (histograms + aggregated confusion matrix).
-    """
-    font_size_delta = 5
-    mean_acc = float(np.mean(acc_list)) if acc_list else 0.0
-    if volume_shape is not None:
-        shape_str = "x".join(str(int(s)) for s in volume_shape)
-        n_circ = n_circuits if n_circuits is not None else len(acc_list)
-        ds = dataset_name or "volume"
-        title = (
-            f"{ds} {shape_str}: mean accuracy {mean_acc:.3f} "
-            f"({n_circ} circuits of {tile_width} addresses)"
-        )
-    else:
-        title = (
-            f"Mean accuracy over {region_width}x{region_height} region, with "
-            f"{len(acc_list)} ({tile_width}x{tile_height}) tiles: {mean_acc:.3f}"
-        )
-    print(f"\n{title}\n")
-
-    fig, ax_arr = plt.subplots(1, 3, figsize=(18, 5))
-    ax_true_hist, ax_hist, ax_cm = ax_arr
-
-    # Classical Classification
-    plot_true_class_input_histogram(
-        all_true_inside_vals,
-        all_true_outside_vals,
-        bins=bins,
-        ax=ax_true_hist,
-    )
-
-    # Quantum Classification
-    plot_correct_incorrect_input_histogram(
-        all_correct_vals,
-        all_incorrect_vals,
-        bins=bins,
-        ax=ax_hist,
-    )
-
-    # Confusion Matrix
-    if cm_list:
-        total_cm = np.sum(np.stack(cm_list, axis=0), axis=0)
-        print(
-            "Aggregated confusion matrix over all runs "
-            "[[true0->pred0, true0->pred1], [true1->pred0, true1->pred1]]:"
-        )
-        print(total_cm)
-        plot_aggregated_confusion_matrix(total_cm, ax=ax_cm)
-    else:
-        ax_cm.set_title("Aggregated Confusion Matrix")
-        ax_cm.text(0.5, 0.5, "No CM data", ha="center", va="center")
-        ax_cm.axis("off")
-
-    #plot_aggregated_predicted_class_counts(agg_counts, ax=ax_bar)
-    for ax in ax_arr:
-        increase_axis_text_size(ax, delta_points=font_size_delta)
-
-    fig.tight_layout()
-    fig.savefig(out_name, dpi=300)
-    print(f"Saved plots to: {out_name}")
-    plt.close(fig)
-    return mean_acc
-
-
-def plot_classical_minus_isovalue_vs_quantum_ev(
-    all_classical_minus_iso_vals,
-    all_quantum_ev_vals,
-    out_name,
-):
-    """
-    Plot classical weighted subtraction vs recovered quantum EV with optional best-fit line.
-    
-    Credit to CursorAI for the following code.
-    """
-    if not all_classical_minus_iso_vals or not all_quantum_ev_vals:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
-        ax.set_title("Classical weighted subtraction vs Quantum ev")
-        ax.text(0.5, 0.5, "No tile accuracy data", ha="center", va="center")
-        ax.axis("off")
-        fig.tight_layout()
-        fig.savefig(out_name, dpi=300)
-        print(f"Saved residual plot to: {out_name}")
-        plt.close(fig)
-        return
-
-    classical_vals = np.concatenate(all_classical_minus_iso_vals).astype(float).reshape(-1)
-    quantum_ev_vals = np.concatenate(all_quantum_ev_vals).astype(float).reshape(-1)
-
-    min_val = float(min(np.min(quantum_ev_vals), np.min(classical_vals)))
-    max_val = float(max(np.max(quantum_ev_vals), np.max(classical_vals)))
-    if np.isclose(min_val, max_val):
-        min_val = min_val - 0.05
-        max_val = max_val + 0.05
-
-    fig, ax = plt.subplots(1, 1, figsize=(6.5, 6.5))
-    ax.scatter(
-        classical_vals,
-        quantum_ev_vals,
-        color="tab:blue",
-        alpha=0.85,
-        label="Data points",
-    )
-    ax.plot(
-        [min_val, max_val],
-        [min_val, max_val],
-        color="gray",
-        linestyle="--",
-        linewidth=1.2,
-        label="Ideal (y = x)",
-    )
-
-    if quantum_ev_vals.size >= 2 and float(np.std(classical_vals)) > 1e-12:
-        coefficients = np.polyfit(classical_vals, quantum_ev_vals, 1)
-        fit_y = np.poly1d(coefficients)(classical_vals)
-        ax.plot(classical_vals, fit_y, color="red", label="Line of Best Fit")
-        print(f"Slope of line of best fit: {coefficients[0]:.4f}")
-    else:
-        mean_q = float(np.mean(quantum_ev_vals))
-        ax.axhline(
-            mean_q,
-            color="red",
-            linewidth=1.3,
-            label=f"Mean quantum EV ({mean_q:.4f})",
-        )
-        print("Line of best fit skipped (classical values are constant).")
-
-    ax.set_xlabel("Classical weighted subtraction value")
-    ax.set_ylabel("Quantum EV")
-    #ax.set_title("Classical weighted subtraction vs Quantum EV")
-    ax.set_xlim(min_val, max_val)
-    ax.set_ylim(min_val, max_val)
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, alpha=0.35)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(out_name, dpi=300)
-    print(
-        "Difference stats "
-        f"(quantum_ev - weighted_subtraction): "
-        f"mean={(quantum_ev_vals - classical_vals).mean():.4f}, "
-        f"min={(quantum_ev_vals - classical_vals).min():.4f}, "
-        f"max={(quantum_ev_vals - classical_vals).max():.4f}"
-    )
-    print(f"Saved residual plot to: {out_name}")
-    plt.close(fig)
-
-
 # -------------------------------- Main --------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
             "QCrank eHANDS vertex classification on 3D sphere/torus volumes. "
-            "Volumes are flattened to 1D and partitioned into circuits (no spatial tiling)."
+            "Volumes are flattened to 1D and partitioned into circuits (no spatial tiling). "
+            "Saves stitched classification data; charts are generated separately by "
+            "ehands_qcrank_vertex_classification_V2_analysis.py."
         )
     )
     parser.add_argument(
@@ -2966,7 +2071,7 @@ if __name__ == "__main__":
         action="store_true",
         help=(
             "For --run-mode hardware: submit the job and exit after printing the job id "
-            "(does not wait for results / does not generate plots)."
+            "(does not wait for results / does not save classification run data)."
         ),
     )
     parser.add_argument(
@@ -2990,16 +2095,6 @@ if __name__ == "__main__":
             "When set, skips circuit execution and uses the saved counts for post-processing. "
             "Tile sizes and shots-coef are auto-detected from the results metadata. "
             "Requires job_submission_info.json in JobOutputs/ (walked up from this path)."
-        ),
-    )
-    parser.add_argument(
-        "--interactive-mesh",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "After saving the marching-cubes PNG, open a VTK window you can rotate "
-            "(left-drag rotate, scroll zoom). Close the window to continue. "
-            "Use --no-interactive-mesh for headless/batch runs."
         ),
     )
     args = parser.parse_args()
@@ -3096,7 +2191,6 @@ if __name__ == "__main__":
         hw_submit_only=bool(args.hw_submit_only),
         hw_results=hw_results,
         volumes=volumes,
-        interactive_mesh=bool(args.interactive_mesh),
     )
 
     if hw_results is not None:
