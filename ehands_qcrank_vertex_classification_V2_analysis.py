@@ -1,7 +1,7 @@
 """Error analysis and visualization for saved QCrank eHANDS 3D classification runs.
 
 Load `.npz` files written by `ehands_qcrank_vertex_classification_V2.py` and
-produce error CSVs, residual/slice plots, and marching-cubes meshes with glyphs.
+produce error CSVs, residual/slice plots, and marching-cubes meshes shaded at misclassified vertices.
 Does not execute quantum circuits.
 """
 import argparse
@@ -553,10 +553,26 @@ def _mesh_stats(poly):
     return n_points, n_tris
 
 
-def _vtk_mesh_actor(polydata, color=(0.35, 0.72, 0.95), wireframe=False):
+# Neutral surface so red / cyan error gradients stay readable.
+_MESH_BASE_COLOR = (0.78, 0.78, 0.80)
+_MESH_WIRE_COLOR = (0.32, 0.32, 0.36)
+_FALSE_OUTSIDE_RGB = np.array((0.95, 0.28, 0.12), dtype=np.float64)
+_FALSE_INSIDE_RGB = np.array((0.15, 0.82, 0.92), dtype=np.float64)
+
+
+def _vtk_mesh_actor(polydata, color=_MESH_BASE_COLOR, wireframe=False, vertex_colors=False):
     mapper = vtk.vtkPolyDataMapper()
     mapper.SetInputData(polydata)
-    mapper.ScalarVisibilityOff()
+    use_colors = bool(
+        vertex_colors and polydata is not None and polydata.GetPointData().GetScalars() is not None
+    )
+    if use_colors:
+        mapper.ScalarVisibilityOn()
+        mapper.SetScalarModeToUsePointData()
+        mapper.SetColorModeToDirectScalars()
+        mapper.SetInterpolateScalarsBeforeMapping(True)
+    else:
+        mapper.ScalarVisibilityOff()
     actor = vtk.vtkActor()
     actor.SetMapper(mapper)
     actor.GetProperty().SetColor(*color)
@@ -567,56 +583,81 @@ def _vtk_mesh_actor(polydata, color=(0.35, 0.72, 0.95), wireframe=False):
         actor.GetProperty().SetDiffuse(0.0)
     else:
         actor.GetProperty().SetInterpolationToPhong()
-        actor.GetProperty().SetAmbient(0.22)
-        actor.GetProperty().SetDiffuse(0.72)
-        actor.GetProperty().SetSpecular(0.4)
-        actor.GetProperty().SetSpecularPower(28)
+        actor.GetProperty().SetAmbient(0.42)
+        actor.GetProperty().SetDiffuse(0.64)
+        actor.GetProperty().SetSpecular(0.16)
+        actor.GetProperty().SetSpecularPower(20)
     return actor
 
 
-def _vtk_error_glyph_actor(xyz, magnitudes, color, base_radius=0.42):
-    """Spheres at misclassified voxels; radius scales with analog-error magnitude."""
-    if vtk is None or numpy_to_vtk is None:
-        return None
-    xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
-    if xyz.shape[0] == 0:
-        return None
-    mags = np.asarray(magnitudes, dtype=np.float64).reshape(-1)
-    if mags.shape[0] != xyz.shape[0]:
-        mags = np.ones(xyz.shape[0], dtype=np.float64)
-    p90 = float(np.percentile(mags, 90)) if mags.size else 1.0
-    p90 = max(p90, 1e-6)
-    scales = base_radius * (0.65 + 0.85 * np.clip(mags / p90, 0.0, 2.0))
+def _color_mesh_by_misclassified_vertices(polydata, error_xyz, error_kinds):
+    """Paint mesh vertices that lie on edges of a misclassified voxel.
 
-    points = vtk.vtkPoints()
-    points.SetData(numpy_to_vtk(np.ascontiguousarray(xyz), deep=True))
-    pdata = vtk.vtkPolyData()
-    pdata.SetPoints(points)
-    scale_arr = numpy_to_vtk(np.ascontiguousarray(scales), deep=True)
-    scale_arr.SetName("glyph_scale")
-    pdata.GetPointData().SetScalars(scale_arr)
+    Those vertices get the false-outside (red) or false-inside (cyan) color.
+    Every other vertex stays the neutral base color, so each triangle that
+    touches an error vertex interpolates from that color to the base.
+    """
+    if polydata is None or vtk is None or numpy_to_vtk is None or vtk_to_numpy is None:
+        return
+    n = int(polydata.GetNumberOfPoints())
+    if n == 0:
+        return
 
-    sphere = vtk.vtkSphereSource()
-    sphere.SetRadius(1.0)
-    sphere.SetThetaResolution(12)
-    sphere.SetPhiResolution(12)
-    glyph = vtk.vtkGlyph3D()
-    glyph.SetSourceConnection(sphere.GetOutputPort())
-    glyph.SetInputData(pdata)
-    glyph.SetScaleModeToScaleByScalar()
-    glyph.SetScaleFactor(1.0)
-    glyph.Update()
+    pts = np.asarray(vtk_to_numpy(polydata.GetPoints().GetData()), dtype=np.float64)
+    base = np.asarray(_MESH_BASE_COLOR, dtype=np.float64)
+    colors = np.tile(base, (n, 1))
 
-    mapper = vtk.vtkPolyDataMapper()
-    mapper.SetInputConnection(glyph.GetOutputPort())
-    mapper.ScalarVisibilityOff()
-    actor = vtk.vtkActor()
-    actor.SetMapper(mapper)
-    actor.GetProperty().SetColor(*color)
-    actor.GetProperty().SetOpacity(0.92)
-    actor.GetProperty().SetAmbient(0.35)
-    actor.GetProperty().SetDiffuse(0.7)
-    return actor
+    error_xyz = np.asarray(error_xyz, dtype=np.float64).reshape(-1, 3)
+    kinds = np.asarray(error_kinds).astype(str).reshape(-1)
+    kind_rgb = {
+        "false_outside": _FALSE_OUTSIDE_RGB,
+        "false_inside": _FALSE_INSIDE_RGB,
+    }
+    voxel_rgb: dict[tuple[int, int, int], np.ndarray] = {}
+    n_err = min(error_xyz.shape[0], kinds.shape[0])
+    for i in range(n_err):
+        rgb = kind_rgb.get(kinds[i])
+        if rgb is None:
+            continue
+        key = (int(round(float(error_xyz[i, 0]))), int(round(float(error_xyz[i, 1]))), int(round(float(error_xyz[i, 2]))))
+        prev = voxel_rgb.get(key)
+        voxel_rgb[key] = rgb.copy() if prev is None else 0.5 * (prev + rgb)
+
+    if voxel_rgb:
+        rounded = np.rint(pts)
+        delta = np.abs(pts - rounded)
+        on_vertex = np.max(delta, axis=1) <= 1e-6
+        axis = np.argmax(delta, axis=1)
+        end_a = rounded.astype(np.int32)
+        end_b = end_a.copy()
+        off = np.flatnonzero(~on_vertex)
+        if off.size:
+            ax = axis[off]
+            flo = np.floor(pts[off, ax]).astype(np.int32)
+            end_a[off, ax] = flo
+            end_b[off, ax] = flo + 1
+
+        for i in range(n):
+            ca = voxel_rgb.get((int(end_a[i, 0]), int(end_a[i, 1]), int(end_a[i, 2])))
+            cb = voxel_rgb.get((int(end_b[i, 0]), int(end_b[i, 1]), int(end_b[i, 2])))
+            if ca is None and cb is None:
+                continue
+            if ca is None:
+                colors[i] = cb
+            elif cb is None or on_vertex[i]:
+                colors[i] = ca
+            else:
+                colors[i] = 0.5 * (ca + cb)
+
+    rgb_u8 = np.clip(np.rint(colors * 255.0), 0, 255).astype(np.uint8)
+    vtk_colors = numpy_to_vtk(
+        np.ascontiguousarray(rgb_u8),
+        deep=True,
+        array_type=vtk.VTK_UNSIGNED_CHAR,
+    )
+    vtk_colors.SetName("Colors")
+    polydata.GetPointData().SetScalars(vtk_colors)
+    polydata.Modified()
 
 
 def _vtk_outline_actor(nx, ny, nz):
@@ -668,7 +709,7 @@ def plot_marching_cubes_classical_vs_quantum(
     interactive=True,
     error_table=None,
 ):
-    """Extract labeled marching cubes and save a PNG; overlay error glyphs; optional VTK window."""
+    """Extract labeled marching cubes and save a PNG; shade triangles at misclassified vertices."""
     empty_stats = {
         "n_tris_classical": 0,
         "n_tris_quantum": 0,
@@ -696,26 +737,20 @@ def plot_marching_cubes_classical_vs_quantum(
         "n_tris_delta": int(n_tris_q - n_tris_c),
     }
 
-    fp_xyz = np.zeros((0, 3), dtype=np.float64)
-    fn_xyz = np.zeros((0, 3), dtype=np.float64)
-    fp_mag = np.zeros((0,), dtype=np.float64)
-    fn_mag = np.zeros((0,), dtype=np.float64)
+    err_xyz = np.zeros((0, 3), dtype=np.float64)
+    err_kinds = np.zeros((0,), dtype=str)
     if error_table and int(np.asarray(error_table.get("x", [])).reshape(-1).size):
-        xyz = np.column_stack(
+        err_xyz = np.column_stack(
             (
                 np.asarray(error_table["x"], dtype=np.float64),
                 np.asarray(error_table["y"], dtype=np.float64),
                 np.asarray(error_table["z"], dtype=np.float64),
             )
         )
-        mags = np.asarray(error_table["abs_ev_err"], dtype=np.float64)
-        kinds = np.asarray(error_table["error_kind"]).astype(str)
-        fp_mask = kinds == "false_outside"
-        fn_mask = kinds == "false_inside"
-        fp_xyz, fp_mag = xyz[fp_mask], mags[fp_mask]
-        fn_xyz, fn_mag = xyz[fn_mask], mags[fn_mask]
-    n_fp = int(fp_xyz.shape[0])
-    n_fn = int(fn_xyz.shape[0])
+        err_kinds = np.asarray(error_table["error_kind"]).astype(str)
+    n_fp = int(np.sum(err_kinds == "false_outside"))
+    n_fn = int(np.sum(err_kinds == "false_inside"))
+    _color_mesh_by_misclassified_vertices(quantum_mesh, err_xyz, err_kinds)
 
     nx, ny, nz = volume.shape
     camera = vtk.vtkCamera()
@@ -723,21 +758,13 @@ def plot_marching_cubes_classical_vs_quantum(
     camera.SetPosition(nx * 2.4, ny * -2.1, nz * 1.8)
     camera.SetFocalPoint((nx - 1) / 2.0, (ny - 1) / 2.0, (nz - 1) / 2.0)
 
-    def _add_error_glyphs(renderer):
-        fp_actor = _vtk_error_glyph_actor(fp_xyz, fp_mag, color=(0.95, 0.28, 0.12))
-        fn_actor = _vtk_error_glyph_actor(fn_xyz, fn_mag, color=(0.15, 0.82, 0.92))
-        if fp_actor is not None:
-            renderer.AddActor(fp_actor)
-        if fn_actor is not None:
-            renderer.AddActor(fn_actor)
-
     ren_left = vtk.vtkRenderer()
     ren_left.SetViewport(0.0, 0.0, 0.5, 1.0)
     ren_left.SetBackground(0.12, 0.12, 0.14)
     ren_left.SetActiveCamera(camera)
     ren_left.AddActor(_vtk_mesh_actor(classical_mesh))
     if n_tris_c:
-        ren_left.AddActor(_vtk_mesh_actor(classical_mesh, color=(0.08, 0.18, 0.28), wireframe=True))
+        ren_left.AddActor(_vtk_mesh_actor(classical_mesh, color=_MESH_WIRE_COLOR, wireframe=True))
     ren_left.AddActor(_vtk_outline_actor(nx, ny, nz))
     ren_left.AddActor(
         _vtk_text_actor(
@@ -751,15 +778,14 @@ def plot_marching_cubes_classical_vs_quantum(
     ren_right.SetViewport(0.5, 0.0, 1.0, 1.0)
     ren_right.SetBackground(0.12, 0.12, 0.14)
     ren_right.SetActiveCamera(camera)
-    ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, color=(0.95, 0.62, 0.28)))
+    ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, vertex_colors=True))
     if n_tris_q:
-        ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, color=(0.28, 0.12, 0.04), wireframe=True))
-    _add_error_glyphs(ren_right)
+        ren_right.AddActor(_vtk_mesh_actor(quantum_mesh, color=_MESH_WIRE_COLOR, wireframe=True))
     ren_right.AddActor(_vtk_outline_actor(nx, ny, nz))
     ren_right.AddActor(_vtk_text_actor(f"quantum MC ({n_tris_q} tris)", 0.04, 0.93))
     ren_right.AddActor(
         _vtk_text_actor(
-            f"glyphs: {n_fp} false outside (red), {n_fn} false inside (cyan)",
+            f"{n_fp} false outside (red), {n_fn} false inside (cyan)",
             0.04,
             0.04,
         )
@@ -786,7 +812,7 @@ def plot_marching_cubes_classical_vs_quantum(
     ax.set_title(
         f"{dataset_name}  |  isolevel={isolevel:.3f}  |  "
         f"classical {n_tris_c} tris vs quantum {n_tris_q} tris  |  "
-        f"{n_fp + n_fn} error glyphs"
+        f"{n_fp + n_fn} misclassified vertices"
     )
     fig.tight_layout()
     fig.savefig(out_name, bbox_inches="tight", dpi=150)
@@ -1625,7 +1651,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
             "Analyze saved QCrank eHANDS 3D classification runs. "
-            "Writes error CSVs, charts, and marching-cubes meshes with error glyphs. "
+            "Writes error CSVs, charts, and marching-cubes meshes shaded at misclassified vertices. "
             "Does not run quantum circuits."
         )
     )
