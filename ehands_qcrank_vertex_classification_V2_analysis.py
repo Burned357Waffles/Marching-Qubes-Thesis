@@ -1275,10 +1275,9 @@ def plot_error_vs_isodistance(
     quantum_ev,
     out_name,
     *,
-    boundary_eps=BOUNDARY_EPS_ORIG,
     dataset_name="volume",
 ):
-    """Histogram and scatter of |value − isolevel| vs analog error, with mistakes highlighted."""
+    """Scatter of |value − isolevel| vs analog error, with mistakes highlighted."""
     vol = np.asarray(volume_orig, dtype=np.float64).reshape(-1)
     n = vol.size
     y_true = np.asarray(y_true, dtype=int).reshape(-1)[:n]
@@ -1290,39 +1289,10 @@ def plot_error_vs_isodistance(
     dist = np.abs(vol - float(isolevel_orig))
     abs_ev = np.abs(ev - sub)
     incorrect = y_true != y_pred
-
-    fig, axes = plt.subplots(1, 2, figsize=(12.6, 5.2))
-    axes[0].hist(
-        dist,
-        bins=40,
-        color="0.75",
-        density=True,
-        label="all voxels",
-    )
-    if np.any(incorrect):
-        axes[0].hist(
-            dist[incorrect],
-            bins=max(8, min(20, int(np.sum(incorrect)))),
-            color="tab:red",
-            alpha=0.72,
-            density=True,
-            label="errors",
-        )
-    axes[0].axvline(
-        float(boundary_eps),
-        color="black",
-        linestyle="--",
-        linewidth=1.1,
-        label=f"boundary ε={float(boundary_eps)}",
-    )
-    axes[0].set_xlabel("|value − isolevel|")
-    axes[0].set_ylabel("density")
-    axes[0].set_title(f"{dataset_name}: error vs distance to isosurface")
-    axes[0].legend(loc="best")
-    axes[0].grid(True, alpha=0.3)
-
     correct = ~incorrect
-    axes[1].scatter(
+
+    fig, ax = plt.subplots(figsize=(7.4, 5.4))
+    ax.scatter(
         dist[correct],
         abs_ev[correct],
         c="0.65",
@@ -1332,7 +1302,7 @@ def plot_error_vs_isodistance(
         zorder=1,
     )
     if np.any(incorrect):
-        axes[1].scatter(
+        ax.scatter(
             dist[incorrect],
             abs_ev[incorrect],
             c="tab:red",
@@ -1341,18 +1311,20 @@ def plot_error_vs_isodistance(
             label="errors",
             zorder=3,
         )
-    axes[1].axvline(
-        float(boundary_eps),
-        color="black",
-        linestyle="--",
-        linewidth=1.1,
-        label=f"boundary ε={float(boundary_eps)}",
-    )
-    axes[1].set_xlabel("|value − isolevel|")
-    axes[1].set_ylabel("|quantum EV − classical residual|")
-    axes[1].set_title(f"{dataset_name}: analog error vs isosurface distance")
-    axes[1].legend(loc="best")
-    axes[1].grid(True, alpha=0.3)
+        max_err_dist = float(np.max(dist[incorrect]))
+        ax.axvline(
+            max_err_dist,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.2,
+            zorder=2,
+            label=f"furthest misclassification ({max_err_dist:.3f})",
+        )
+    ax.set_xlabel("|value − isolevel|")
+    ax.set_ylabel("|quantum EV − classical (value − isolevel)|")
+    ax.set_title(f"{dataset_name}: quantum–classical mismatch vs distance to isosurface")
+    ax.legend(loc="best")
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_name) or ".", exist_ok=True)
@@ -1545,7 +1517,6 @@ def analyze_classification_run(run, *, interactive_mesh=False):
         quantum_ev=run["quantum_ev"],
         out_name=error_iso_out,
         dataset_name=run["dataset_name"],
-        boundary_eps=BOUNDARY_EPS_ORIG,
     )
     plot_classical_minus_isovalue_vs_quantum_ev(
         all_classical_minus_iso_vals=[run["subtraction_vals"]],
