@@ -7,3 +7,4 @@ ideal_qcrankV2.py
 *.key
 *.p12
 *.pfx
+.venv
